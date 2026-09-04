@@ -17,7 +17,7 @@ def supabase_client() -> Client:
 def authenticated_user(authorization: str | None, settings: Settings) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authentication required")
-    if settings.mode == "replay":
+    if settings.auth_mode == "demo":
         return "demo-user"
 
     token = authorization.removeprefix("Bearer ").strip()

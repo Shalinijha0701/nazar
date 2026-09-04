@@ -47,23 +47,21 @@ def _candle(
 
 
 # ---------------------------------------------------------------------------
-# Demo candle series  (Friday 11:15–14:00, 1-minute cadence sampled at 15m)
+# Demo candle series (Friday 11:15–14:00, genuine 15-minute candles)
 # ---------------------------------------------------------------------------
 
 SESSION_START = datetime(2026, 9, 4, 5, 45, tzinfo=UTC)  # 11:15 IST = 05:45 UTC
+REPLAY_EVALUATED_THROUGH = SESSION_START + timedelta(minutes=165)  # 14:00 IST
 
-# Infosys: spike at minute 60 (12:15), reversal by minute 165 (14:00)
+# Infosys: spike at 12:15, reversal by 14:00.
 INFY_PRICES = [
-    1762.4, 1764.1, 1765.8, 1768.0,  # 11:15–11:45
-    1771.6, 1776.3, 1781.5, 1788.2,  # 11:45–12:00
-    1796.4, 1807.0, 1816.8, 1820.0,  # 12:00–12:15  ← peak
-    1814.2, 1806.1, 1797.3, 1789.6,  # 12:15–12:45
-    1783.0, 1778.1, 1773.5, 1769.2,  # 12:45–13:15
-    1766.0, 1764.9, 1763.8, 1764.2,  # 13:15–14:00
+    1762.4, 1771.6, 1781.5, 1796.4,
+    1816.8, 1820.0, 1797.3, 1778.1,
+    1769.2, 1764.9, 1763.8, 1764.2,
 ]
 
 INFY_CANDLES = [
-    _candle("INFY", m, p + 2.0, p - 2.0, p, SESSION_START)
+    _candle("INFY", m * 15, p + 2.0, p - 2.0, p, SESSION_START)
     for m, p in enumerate(INFY_PRICES)
 ]
 
@@ -78,7 +76,7 @@ NIFTY_IT_PRICES = [
 ]
 
 NIFTY_IT_CANDLES = [
-    _candle("NIFTY_IT", m, p + 5, p - 5, p, SESSION_START)
+    _candle("NIFTY_IT", m * 15, p + 5, p - 5, p, SESSION_START)
     for m, p in enumerate(NIFTY_IT_PRICES)
 ]
 
@@ -182,6 +180,7 @@ def _infy_signals(reviewed: datetime, evaluated: datetime) -> list[Signal]:
                 f"{'Below' if direction == 'below_sector' else 'Above'} sector trend · "
                 f"{round(result.percentile, 0):.0f}th percentile"
             ),
+            occurred_at=evaluated,
             percentile=round(result.percentile, 1),
             observation_count=result.observation_count,
             direction=direction,
@@ -227,6 +226,7 @@ def _reliance_signals(reviewed: datetime, evaluated: datetime) -> list[Signal]:
                 f"{'Above' if direction == 'above_sector' else 'Below'} sector trend · "
                 f"{round(result.percentile, 0):.0f}th percentile"
             ),
+            occurred_at=evaluated,
             percentile=round(result.percentile, 1),
             observation_count=result.observation_count,
             direction=direction,
@@ -248,6 +248,7 @@ def _hdfc_signals() -> list[Signal]:
         return [Signal(
             kind=SignalKind.PERSONAL_RULE,
             label=f"Volume pace crossed 1.8×",
+            occurred_at=REPLAY_EVALUATED_THROUGH,
             evidence={
                 "volume_pace": round(pace, 2),
                 "comparison_sessions": len(HDFC_HISTORICAL_SAME_MINUTE_MEDIANS),
@@ -271,12 +272,24 @@ def recorded_demo_catchup(reviewed: datetime, evaluated: datetime) -> dict:
     reliance_signals = _reliance_signals(reviewed, evaluated)
     hdfc_signals = _hdfc_signals()
 
+    def _acknowledged(signals: list[Signal]) -> list[Signal]:
+        return [
+            signal for signal in signals
+            if signal.occurred_at is None or signal.occurred_at > reviewed
+        ]
+
+    infy_signals = _acknowledged(infy_signals)
+    reliance_signals = _acknowledged(reliance_signals)
+    hdfc_signals = _acknowledged(hdfc_signals)
+
     def _card(
         symbol: str,
         company: str,
         price: float,
         baseline: float,
         signals: list[Signal],
+        candles: list[Candle],
+        narrative: str,
         data_state: DataState = DataState.FRESH,
         last_updated: datetime | None = None,
     ) -> dict:
@@ -289,6 +302,8 @@ def recorded_demo_catchup(reviewed: datetime, evaluated: datetime) -> dict:
             data_state=data_state,
             last_updated_at=last_updated or evaluated,
             signals=signals,
+            candles=candles,
+            narrative=narrative,
         ).model_dump(mode="json")
 
     attention = []
@@ -299,6 +314,8 @@ def recorded_demo_catchup(reviewed: datetime, evaluated: datetime) -> dict:
         price=RELIANCE_CANDLES[-1].close,
         baseline=RELIANCE_CANDLES[0].close,
         signals=reliance_signals,
+        candles=RELIANCE_CANDLES,
+        narrative="Reliance separated from the broad market and held most of the move after an early acceleration.",
     )
     (attention if reliance_signals else normal).append(reliance_card)
 
@@ -307,6 +324,8 @@ def recorded_demo_catchup(reviewed: datetime, evaluated: datetime) -> dict:
         price=INFY_CANDLES[-1].close,
         baseline=INFY_CANDLES[0].close,
         signals=infy_signals,
+        candles=INFY_CANDLES,
+        narrative="The current price looks quiet, but the interval contained a rare spike and near-complete reversal.",
     )
     (attention if infy_signals else normal).append(infy_card)
 
@@ -315,6 +334,8 @@ def recorded_demo_catchup(reviewed: datetime, evaluated: datetime) -> dict:
         price=1711.6,
         baseline=1688.1,
         signals=hdfc_signals,
+        candles=[],
+        narrative="Price movement was orderly, but trading volume accelerated far beyond its usual time-of-day pace.",
     )
     (attention if hdfc_signals else normal).append(hdfc_card)
 
@@ -325,18 +346,20 @@ def recorded_demo_catchup(reviewed: datetime, evaluated: datetime) -> dict:
         ("ITC", "ITC", 500.3, 498.4),
         ("TATAMOTORS", "Tata Motors", 1040.4, 1032.2),
     ]:
-        normal.append(_card(sym, name, price, baseline, []))
+        normal.append(_card(sym, name, price, baseline, [], [], "No personal condition or unusual sector-relative movement was detected."))
 
     data_unavailable = [
         _card(
             "IRCTC", "Indian Railway Catering & Tourism",
             price=951.2, baseline=948.6, signals=[],
+            candles=[], narrative="The provider stopped updating this symbol. No new signal was inferred from the cached value.",
             data_state=DataState.UNAVAILABLE,
             last_updated=datetime(2026, 9, 4, 7, 0, tzinfo=UTC),  # 12:30 IST
         ),
         _card(
             "ZOMATO", "Eternal",
             price=270.8, baseline=268.2, signals=[],
+            candles=[], narrative="Current market data is unavailable, so the stock is separated from ranked attention items.",
             data_state=DataState.UNAVAILABLE,
             last_updated=datetime(2026, 9, 4, 7, 15, tzinfo=UTC),  # 12:45 IST
         ),
@@ -346,7 +369,7 @@ def recorded_demo_catchup(reviewed: datetime, evaluated: datetime) -> dict:
         watchlist_id="primary",
         reviewed_through=reviewed,
         evaluated_through=evaluated,
-        trading_minutes=len(INFY_CANDLES),
+        trading_minutes=int((evaluated - reviewed).total_seconds() / 60),
         coverage="full",
         counts={
             "attention": len(attention),

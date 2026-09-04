@@ -21,6 +21,8 @@ type CatchupCard = {
   data_state: DataState;
   last_updated_at: string | null;
   signals: CatchupSignal[];
+  candles?: Array<{ interval_start: string; close: number }>;
+  narrative?: string | null;
 };
 
 export type CatchupResponse = {
@@ -31,6 +33,8 @@ export type CatchupResponse = {
   attention: CatchupCard[];
   normal: CatchupCard[];
   data_unavailable: CatchupCard[];
+  trading_minutes: number;
+  coverage: string;
 };
 
 const apiBase = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/$/, "");
@@ -39,11 +43,14 @@ export function mapCatchupResponseToStockRecords(data: CatchupResponse): StockRe
   const cards = [...data.attention, ...data.normal, ...data.data_unavailable];
   return cards.map((card) => {
     const fallback = demoStocks.find((stock) => stock.symbol === card.symbol);
-    const baseline = fallback?.baseline ?? card.current_price ?? 0;
+    const candles = card.candles ?? [];
+    const baseline = candles[0]?.close ?? fallback?.baseline ?? card.current_price ?? 0;
     const current = card.current_price ?? baseline;
-    const series = fallback?.series ?? [baseline, current];
-    const nextSeries = [...series];
-    nextSeries[nextSeries.length - 1] = current;
+    const nextSeries = candles.length > 0 ? candles.map((candle) => candle.close) : [...(fallback?.series ?? [baseline, current])];
+    if (candles.length === 0) nextSeries[nextSeries.length - 1] = current;
+    const times = candles.length > 0
+      ? candles.map((candle) => new Date(candle.interval_start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }))
+      : fallback?.times ?? ["Review", "Now"];
 
     return {
       symbol: card.symbol,
@@ -52,7 +59,7 @@ export function mapCatchupResponseToStockRecords(data: CatchupResponse): StockRe
       sectorIndex: fallback?.sectorIndex ?? "NIFTY 50",
       baseline,
       series: nextSeries,
-      times: fallback?.times ?? ["Review", "Now"],
+      times,
       dataState: card.data_state,
       lastUpdated: card.last_updated_at ? new Date(card.last_updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Unknown",
       signals: card.signals.map((signal, index) => ({
@@ -63,9 +70,11 @@ export function mapCatchupResponseToStockRecords(data: CatchupResponse): StockRe
           ? `${signal.percentile.toFixed(1)}th percentile${signal.evidence?.observation_count ? ` across ${signal.evidence.observation_count} observations` : ""}`
           : "Confirmed from the backend signal pipeline",
         tone: signal.kind === "personal_rule" ? "violet" : signal.kind === "sector_surprise" ? "blue" : "amber",
-        triggerIndex: fallback?.signals.find((item) => item.kind === signal.kind)?.triggerIndex ?? nextSeries.length - 1,
+        triggerIndex: signal.occurred_at
+          ? Math.max(0, candles.findIndex((candle) => candle.interval_start === signal.occurred_at))
+          : nextSeries.length - 1,
       })),
-      narrative: fallback?.narrative ?? "The backend returned this watchlist observation.",
+      narrative: card.narrative ?? "The backend returned this watchlist observation.",
     };
   });
 }

@@ -44,6 +44,8 @@ class CatchupCard(BaseModel):
     data_state: DataState
     last_updated_at: datetime | None
     signals: list[Signal]
+    candles: list[Candle] = Field(default_factory=list)
+    narrative: str | None = None
 
 
 class CatchupResponse(BaseModel):

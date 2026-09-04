@@ -188,7 +188,9 @@ def path_metrics(candles: Sequence[Candle], baseline_price: float) -> PathMetric
     peak_to_trough = 0.0
     trough_to_peak = 0.0
 
-    for candle in candles:
+    for candle in candles[1:]:
+        # OHLC data does not reveal whether a candle's high or low came first.
+        # Compare only an earlier completed candle with a later candle.
         peak_to_trough = max(
             peak_to_trough,
             (highest_seen - candle.low) / highest_seen,

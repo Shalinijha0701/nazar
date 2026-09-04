@@ -1,5 +1,13 @@
 # Nazar
 
+Live frontend: `https://your-production-domain.vercel.app`  
+API health: `https://your-api.vercel.app/health`  
+60-second demo: open the dashboard, inspect INFY evidence, add a stock or rule, press **Mark reviewed**, then refresh to verify acknowledged events disappear.
+
+## 100-word product pitch
+
+Nazar is a market catch-up watchlist for people who return after the market has moved. It separates meaningful evidence from ordinary noise: personal price or volume rules, unusual sector-relative movement, and spikes or reversals hidden by the final price. Every signal includes its timestamp, observed candles, percentile, and comparison count, so users can trace the calculation instead of trusting a score. Nazar does not predict prices or recommend trades. The recorded replay makes the demo deterministic and inspectable, while the API contract supports persistent watchlists and future live ingestion. It is a calm, explainable layer between market movement and human attention.
+
 Nazar is a market catch-up watchlist. It does not predict prices or recommend
 trades. It tells a returning user whether a personal condition was crossed,
 whether a stock moved unusually relative to its sector, or whether a meaningful
@@ -7,8 +15,8 @@ spike or reversal happened while the user was away.
 
 The deployed interface calls the FastAPI catch-up endpoint and maps its response
 into the dashboard. If the API is unavailable, it falls back to the labelled
-recorded demo so the judging flow remains usable. Values are illustrative and
-are labelled as demo data.
+recorded demo and visibly reports that the backend is unavailable. Values are
+illustrative and are labelled as demo data.
 
 Watchlist creation, stock additions, personal rules, and acknowledgement are
 API-backed. Replay mode uses an in-process demo watermark; live mode persists
@@ -90,8 +98,10 @@ PYTHONPATH=backend python -m unittest discover -s backend/tests -v
 
 1. Apply `supabase/schema.sql` to a Supabase project.
 2. Fill the `NAZAR_SUPABASE_*` values in `backend/.env`.
-3. Set `NAZAR_MODE=replay` for the complete recorded demo, or configure the
-  frontend with `NEXT_PUBLIC_API_BASE=https://your-api.example.com`.
+3. For a persistent replay deployment set `NAZAR_MARKET_PROVIDER=replay`,
+  `NAZAR_PERSISTENCE=supabase`, and `NAZAR_AUTH_MODE=supabase`. For the
+  standalone demo use `replay`, `memory`, and `demo` respectively. Configure
+  the frontend with `NEXT_PUBLIC_API_BASE=https://your-api.example.com`.
 4. The frontend sends the demo bearer token in replay mode. Replace that client
   authentication with the deployed identity provider before exposing live data.
 
@@ -100,9 +110,10 @@ header and does not accept a caller-supplied user ID in watchlist routes
 (prevents IDOR).
 
 `GrowwProvider` implements the market-data adapter interface and is unit-testable
-in isolation. End-to-end live aggregation (route → repository → GrowwProvider →
-`signals.py`) is the next milestone; replay mode demonstrates the complete
-signal pipeline against recorded data.
+in isolation. The current submission scope is replay aggregation. Live Groww
+aggregation remains disabled at the route until its provider, trading calendar,
+retries, partial-failure handling, and distribution store are wired end to end;
+the API returns 501 rather than presenting a static replay as live data.
 
 ## Deliberate trade-offs
 

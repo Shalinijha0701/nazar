@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Sequence
 
 import httpx
@@ -73,7 +73,7 @@ class GrowwProvider:
                 result[symbol] = [
                     Candle(
                         symbol=symbol,
-                        interval_start=datetime.fromtimestamp(row[0] / 1000),
+                        interval_start=datetime.fromtimestamp(row[0] / 1000, tz=UTC),
                         open=float(row[1]),
                         high=float(row[2]),
                         low=float(row[3]),

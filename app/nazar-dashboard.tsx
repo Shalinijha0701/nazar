@@ -73,7 +73,7 @@ const MAX_REPLAY_INDEX = demoStocks[0].series.length - 1;
 
 export default function NazarDashboard() {
   const [watchlistId, setWatchlistId] = useState<string | null>(null);
-  const { data: catchup, error: catchupError } = useCatchup(watchlistId ?? "primary");
+  const { data: catchup, error: catchupError, loading: catchupLoading } = useCatchup(watchlistId ?? "primary");
   const [stocks, setStocks] = useState<StockRecord[]>(demoStocks);
   const [replayIndex, setReplayIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -134,7 +134,7 @@ export default function NazarDashboard() {
     unavailable: projected.filter((stock) => stock.group === "unavailable").length,
   }), [projected]);
 
-  const replayTime = demoStocks[0].times[Math.min(replayIndex, MAX_REPLAY_INDEX)];
+  const replayTime = projected[0]?.times[Math.min(replayIndex, MAX_REPLAY_INDEX)] ?? "--:--";
 
   function resetReplay() {
     setPlaying(false);
@@ -287,7 +287,7 @@ export default function NazarDashboard() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Badge variant="outline" className="hidden border-amber-200 bg-amber-50 text-amber-800 sm:inline-flex">{catchupError ? "Demo fallback" : "Backend connected"} · {replayTime} IST</Badge>
+              <Badge variant="outline" className={`hidden sm:inline-flex ${catchupError ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>{catchupLoading ? "Connecting..." : catchupError ? "Demo fallback · backend unavailable" : "Backend connected"} · {replayTime} IST</Badge>
               <Button variant="outline" className="rounded-xl bg-white" onClick={() => setAddOpen(true)}><Plus /> Add stock</Button>
               <Button className="rounded-xl bg-[#0b1020] text-white hover:bg-[#1b2440]" onClick={markReviewed} disabled={reviewed}><ShieldCheck /> {reviewed ? "Reviewed" : "Mark reviewed"}</Button>
             </div>
@@ -391,7 +391,13 @@ export default function NazarDashboard() {
                 </div>
                 <div className="mt-6 rounded-2xl border border-slate-200 p-4"><div className="flex items-center gap-2 text-sm font-bold"><Info className="size-4 text-violet-600" /> What happened</div><p className="mt-2 text-sm leading-6 text-slate-600">{selected.narrative}</p></div>
                 <div className="mt-6"><h3 className="text-sm font-black uppercase tracking-[0.12em] text-slate-400">Evidence receipt</h3><div className="mt-3 grid gap-2">{selected.visibleSignals.length ? selected.visibleSignals.map((signal) => <SignalBadge key={signal.id} signal={signal} />) : <div className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500">No signal crossed its visible threshold in this interval.</div>}</div></div>
-                {selected.visibleSignals.some((signal) => signal.kind === "sector_surprise") && <div className="mt-6 rounded-2xl border border-slate-200 p-4"><div className="flex items-center justify-between text-sm"><span className="font-semibold">Historical surprise percentile</span><span className="font-black">98%</span></div><Progress value={98} className="mt-3 bg-slate-100 [&_[data-slot=progress-indicator]]:bg-violet-600" /><p className="mt-3 text-xs leading-5 text-slate-500">Compared with 252 valid sector-relative observations at a conservative 4-hour trading horizon.</p></div>}
+                {selected.visibleSignals.filter((signal) => signal.kind === "sector_surprise").map((signal) => {
+                  const match = signal.detail.match(/(\d+(?:\.\d+)?)th percentile(?: across (\d+) observations)?/);
+                  if (!match) return null;
+                  const percentile = Number(match[1]);
+                  const observations = match[2] ?? "available";
+                  return <div key={signal.id} className="mt-6 rounded-2xl border border-slate-200 p-4"><div className="flex items-center justify-between text-sm"><span className="font-semibold">Historical surprise percentile</span><span className="font-black">{percentile}%</span></div><Progress value={percentile} className="mt-3 bg-slate-100 [&_[data-slot=progress-indicator]]:bg-violet-600" /><p className="mt-3 text-xs leading-5 text-slate-500">Compared with {observations} valid sector-relative observations from the backend response.</p></div>;
+                })}
               </div>
             </>
           )}
