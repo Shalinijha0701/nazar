@@ -5,7 +5,6 @@ import {
   Activity,
   BellRing,
   ChevronDown,
-  Database,
   Eye,
   Info,
   Pause,
@@ -14,7 +13,6 @@ import {
   RotateCcw,
   Search,
   ShieldCheck,
-  Target,
   Trash2,
 } from "lucide-react";
 import {
@@ -255,9 +253,7 @@ export default function NazarDashboard() {
           <div><p className="font-black tracking-tight">Nazar</p><p className="text-xs text-slate-400">Meaningful change</p></div>
         </div>
         <nav className="px-3">
-          <button className="flex w-full items-center gap-3 rounded-xl bg-white/10 px-3 py-3 text-sm font-semibold"><Activity className="size-4 text-[#b8ff65]" /> Market catch-up</button>
-          <button className="mt-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm text-slate-400 hover:bg-white/5 hover:text-white"><Target className="size-4" /> Personal rules</button>
-          <button className="mt-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm text-slate-400 hover:bg-white/5 hover:text-white"><Database className="size-4" /> Data health</button>
+          <div className="flex w-full items-center gap-3 rounded-xl bg-white/10 px-3 py-3 text-sm font-semibold"><Activity className="size-4 text-[#b8ff65]" /> Market catch-up</div>
         </nav>
         <div className="mt-7 px-6"><p className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Your watchlist</p></div>
         <div className="mt-3 flex-1 overflow-y-auto px-3 pb-4">
