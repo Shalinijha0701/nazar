@@ -5,7 +5,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://backend-7z2ubjjfm-shalinijha1008s-projects.vercel.app/api/:path*"
+      "destination": "https://backend-kbnwr9umm-shalinijha1008s-projects.vercel.app/api/:path*"
     }
   ]
 }
