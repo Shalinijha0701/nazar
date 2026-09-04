@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from statistics import median
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from app.models import Candle
 
@@ -24,16 +24,22 @@ class PathMetrics:
     downward_excursion: float
     peak_to_trough_reversal: float
     trough_to_peak_reversal: float
+    upward_at: datetime
+    downward_at: datetime
+    peak_to_trough_at: datetime | None
+    trough_to_peak_at: datetime | None
+
+
+@dataclass(frozen=True)
+class PathSignalResult:
+    event_type: str
+    magnitude: float
+    percentile: float
+    observation_count: int
+    occurred_at: datetime
 
 
 def select_horizon(trading_minutes: int) -> tuple[int | None, str]:
-    """Choose a conservative ceiling bucket for the observed interval.
-
-    Uses the smallest supported bucket >= trading_minutes so a shorter
-    observed move is compared against a distribution that had at least
-    as much time to develop.  Returns (None, "insufficient_interval")
-    when fewer than 15 trading minutes have elapsed.
-    """
     if trading_minutes < SUPPORTED_HORIZONS[0]:
         return None, "insufficient_interval"
     for horizon in SUPPORTED_HORIZONS:
@@ -43,51 +49,30 @@ def select_horizon(trading_minutes: int) -> tuple[int | None, str]:
 
 
 def empirical_percentile(value: float, observations: Sequence[float]) -> float:
-    """Fraction of observations <= value, expressed as 0–100."""
     if not observations:
         raise ValueError("at least one observation is required")
-    less_or_equal = sum(observation <= value for observation in observations)
-    return 100.0 * less_or_equal / len(observations)
+    return 100.0 * sum(observation <= value for observation in observations) / len(observations)
 
-
-# ---------------------------------------------------------------------------
-# Timestamp-aligned sector surprise
-# ---------------------------------------------------------------------------
 
 def _align_by_timestamp(
     stock_candles: Sequence[Candle],
     sector_candles: Sequence[Candle],
 ) -> tuple[list[Candle], list[Candle]]:
-    """Return only candles whose interval_start exists in both sequences.
-
-    Illiquid stocks may be missing minute candles that the sector index
-    has.  Index-by-index alignment would corrupt the return calculation
-    if the lengths differ.  This function joins on the exact timestamp
-    so both lists are the same length and correspond to the same moments.
-
-    Trade-off (documented): the join discards unmatched minutes, so the
-    stock return is computed over the intersection window only.  This is
-    conservative and noted in the README.
-    """
-    sector_by_ts: dict[datetime, Candle] = {c.interval_start: c for c in sector_candles}
-    aligned_stock: list[Candle] = []
-    aligned_sector: list[Candle] = []
-    for candle in stock_candles:
-        match = sector_by_ts.get(candle.interval_start)
-        if match is not None:
-            aligned_stock.append(candle)
-            aligned_sector.append(match)
-    return aligned_stock, aligned_sector
+    sector_by_time = {candle.interval_start: candle for candle in sector_candles}
+    pairs = [
+        (candle, sector_by_time[candle.interval_start])
+        for candle in stock_candles
+        if candle.interval_start in sector_by_time
+    ]
+    pairs.sort(key=lambda pair: pair[0].interval_start)
+    return [pair[0] for pair in pairs], [pair[1] for pair in pairs]
 
 
 def candle_return(candles: Sequence[Candle], baseline_price: float) -> float | None:
-    """Log-free percentage return from baseline to the last candle close.
-
-    Returns None if there are no candles or baseline is not positive.
-    """
     if not candles or baseline_price <= 0:
         return None
-    return (candles[-1].close - baseline_price) / baseline_price
+    ordered = sorted(candles, key=lambda candle: candle.interval_start)
+    return (ordered[-1].close - baseline_price) / baseline_price
 
 
 def sector_surprise(
@@ -97,21 +82,6 @@ def sector_surprise(
     sector_baseline: float,
     historical_relative_returns: Sequence[float],
 ) -> PercentileResult | None:
-    """Two-sided sector-relative surprise using timestamp-aligned candles.
-
-    Formula (from functional spec):
-        x_now = stock_return(t0,t1) - sector_return(t0,t1)
-        d_now = abs(x_now - median(historical_relative_returns))
-        percentile = empirical_percentile(d_now, historical_deviations)
-
-    Both positive and negative deviations trigger when >= SURPRISE_TRIGGER.
-    Direction must be inferred by the caller from (x_now - median) sign.
-
-    Returns None when:
-    - fewer than MINIMUM_OBSERVATIONS historical returns are available
-    - candle alignment leaves no shared timestamps
-    - either baseline is non-positive
-    """
     if len(historical_relative_returns) < MINIMUM_OBSERVATIONS:
         return None
 
@@ -119,106 +89,152 @@ def sector_surprise(
     if not aligned_stock:
         return None
 
-    r_stock = candle_return(aligned_stock, stock_baseline)
-    r_sector = candle_return(aligned_sector, sector_baseline)
-    if r_stock is None or r_sector is None:
+    stock_return = candle_return(aligned_stock, stock_baseline)
+    sector_return = candle_return(aligned_sector, sector_baseline)
+    if stock_return is None or sector_return is None:
         return None
 
-    x_now = r_stock - r_sector
-    center = median(historical_relative_returns)
-    historical_deviations = [abs(v - center) for v in historical_relative_returns]
-    d_now = abs(x_now - center)
-
+    relative_return = stock_return - sector_return
+    historical_median = median(historical_relative_returns)
+    historical_deviations = [
+        abs(value - historical_median) for value in historical_relative_returns
+    ]
+    deviation = relative_return - historical_median
     return PercentileResult(
-        percentile=empirical_percentile(d_now, historical_deviations),
+        percentile=empirical_percentile(abs(deviation), historical_deviations),
         observation_count=len(historical_relative_returns),
-        deviation=x_now - center,  # signed; caller reads direction from sign
+        deviation=deviation,
     )
 
 
-# ---------------------------------------------------------------------------
-# Volume pace (same-time-of-day median, not raw volume)
-# ---------------------------------------------------------------------------
-
 def volume_pace(
     cumulative_session_volume: int,
-    historical_same_minute_medians: Sequence[float],
+    historical_same_minute_volumes: Sequence[float],
 ) -> float | None:
-    """Return V(m) / median(historical same-minute cumulative volumes).
-
-    Uses the same-time-of-day historical median so early-session minutes
-    are not penalised for having lower raw volume than midday minutes.
-
-    Returns None when fewer than 20 historical sessions exist or the
-    historical median is zero (no meaningful baseline).
-
-    Trigger threshold is the caller's responsibility (the personal rule).
-    """
-    if len(historical_same_minute_medians) < 20:
+    if len(historical_same_minute_volumes) < 20:
         return None
-    hist_median = median(historical_same_minute_medians)
-    if hist_median <= 0:
+    historical_median = median(historical_same_minute_volumes)
+    if historical_median <= 0:
         return None
-    return cumulative_session_volume / hist_median
+    return cumulative_session_volume / historical_median
 
 
-# ---------------------------------------------------------------------------
-# Path metrics (excursion and reversal from minute candles)
-# ---------------------------------------------------------------------------
+def first_volume_pace_crossing(
+    samples: Sequence[tuple[datetime, int, Sequence[float]]],
+    threshold: float,
+) -> tuple[datetime, float] | None:
+    previous: float | None = None
+    for timestamp, cumulative_volume, historical_volumes in sorted(samples):
+        pace = volume_pace(cumulative_volume, historical_volumes)
+        if pace is None:
+            previous = None
+            continue
+        if previous is not None and previous < threshold <= pace:
+            return timestamp, pace
+        previous = pace
+    return None
+
 
 def path_metrics(candles: Sequence[Candle], baseline_price: float) -> PathMetrics:
-    """Compute excursion and reversal magnitudes over a candle sequence.
-
-    All four metrics use the historical excursion/reversal distribution
-    for the same trading-time horizon to determine whether the event is
-    statistically unusual (caller compares against distribution).
-
-    Baseline price is the last confirmed price at reviewed_through (t0).
-    """
     if not candles:
         raise ValueError("candles are required")
     if baseline_price <= 0:
         raise ValueError("baseline price must be positive")
 
-    upward = max(candle.high / baseline_price - 1 for candle in candles)
-    downward = max(1 - candle.low / baseline_price for candle in candles)
+    ordered = sorted(candles, key=lambda candle: candle.interval_start)
+    upward_candle = max(ordered, key=lambda candle: candle.high)
+    downward_candle = min(ordered, key=lambda candle: candle.low)
 
-    highest_seen = candles[0].high
-    lowest_seen = candles[0].low
+    highest_prior = ordered[0].high
+    lowest_prior = ordered[0].low
     peak_to_trough = 0.0
     trough_to_peak = 0.0
+    peak_to_trough_at: datetime | None = None
+    trough_to_peak_at: datetime | None = None
 
-    for candle in candles[1:]:
-        # OHLC data does not reveal whether a candle's high or low came first.
-        # Compare only an earlier completed candle with a later candle.
-        peak_to_trough = max(
-            peak_to_trough,
-            (highest_seen - candle.low) / highest_seen,
-        )
-        trough_to_peak = max(
-            trough_to_peak,
-            (candle.high - lowest_seen) / lowest_seen,
-        )
-        highest_seen = max(highest_seen, candle.high)
-        lowest_seen = min(lowest_seen, candle.low)
+    for candle in ordered[1:]:
+        decline = (highest_prior - candle.low) / highest_prior
+        recovery = (candle.high - lowest_prior) / lowest_prior
+        if decline > peak_to_trough:
+            peak_to_trough = decline
+            peak_to_trough_at = candle.interval_start
+        if recovery > trough_to_peak:
+            trough_to_peak = recovery
+            trough_to_peak_at = candle.interval_start
+        highest_prior = max(highest_prior, candle.high)
+        lowest_prior = min(lowest_prior, candle.low)
 
     return PathMetrics(
-        upward_excursion=max(0.0, upward),
-        downward_excursion=max(0.0, downward),
+        upward_excursion=max(0.0, upward_candle.high / baseline_price - 1),
+        downward_excursion=max(0.0, 1 - downward_candle.low / baseline_price),
         peak_to_trough_reversal=peak_to_trough,
         trough_to_peak_reversal=trough_to_peak,
+        upward_at=upward_candle.interval_start,
+        downward_at=downward_candle.interval_start,
+        peak_to_trough_at=peak_to_trough_at,
+        trough_to_peak_at=trough_to_peak_at,
     )
 
 
-# ---------------------------------------------------------------------------
-# Personal rule: price crossing (raw threshold check on candle highs/lows)
-# ---------------------------------------------------------------------------
+def most_unusual_path(
+    metrics: PathMetrics,
+    distributions: Mapping[str, Sequence[float]],
+) -> PathSignalResult | None:
+    values = {
+        "upward_excursion": (metrics.upward_excursion, metrics.upward_at),
+        "downward_excursion": (metrics.downward_excursion, metrics.downward_at),
+        "peak_to_trough": (metrics.peak_to_trough_reversal, metrics.peak_to_trough_at),
+        "trough_to_peak": (metrics.trough_to_peak_reversal, metrics.trough_to_peak_at),
+    }
+    candidates: list[PathSignalResult] = []
+    for event_type, (magnitude, occurred_at) in values.items():
+        history = distributions.get(event_type, ())
+        if occurred_at is None or len(history) < MINIMUM_OBSERVATIONS:
+            continue
+        historical_median = median(history)
+        deviations = [abs(value - historical_median) for value in history]
+        percentile = empirical_percentile(abs(magnitude - historical_median), deviations)
+        candidates.append(
+            PathSignalResult(
+                event_type=event_type,
+                magnitude=magnitude,
+                percentile=percentile,
+                observation_count=len(history),
+                occurred_at=occurred_at,
+            )
+        )
+
+    if not candidates:
+        return None
+    result = max(candidates, key=lambda candidate: candidate.percentile)
+    return result if result.percentile >= SURPRISE_TRIGGER else None
+
+
+def first_crossed_above(
+    candles: Sequence[Candle], baseline: float, threshold: float
+) -> datetime | None:
+    if baseline >= threshold:
+        return None
+    for candle in sorted(candles, key=lambda item: item.interval_start):
+        if candle.high >= threshold:
+            return candle.interval_start
+    return None
+
+
+def first_crossed_below(
+    candles: Sequence[Candle], baseline: float, threshold: float
+) -> datetime | None:
+    if baseline <= threshold:
+        return None
+    for candle in sorted(candles, key=lambda item: item.interval_start):
+        if candle.low <= threshold:
+            return candle.interval_start
+    return None
+
 
 def crossed_above(candles: Sequence[Candle], baseline: float, threshold: float) -> bool:
-    """True when baseline was below threshold and a candle high reached it."""
-    return baseline < threshold and any(candle.high >= threshold for candle in candles)
+    return first_crossed_above(candles, baseline, threshold) is not None
 
 
 def crossed_below(candles: Sequence[Candle], baseline: float, threshold: float) -> bool:
-    """True when baseline was above threshold and a candle low reached it."""
-    return baseline > threshold and any(candle.low <= threshold for candle in candles)
+    return first_crossed_below(candles, baseline, threshold) is not None

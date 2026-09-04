@@ -15,6 +15,7 @@ import {
   Search,
   ShieldCheck,
   Target,
+  Trash2,
 } from "lucide-react";
 import {
   Line,
@@ -64,22 +65,20 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
-import { addableStocks, demoStocks } from "@/lib/nazar/demo-data";
+import { mapCatchupResponse } from "@/lib/nazar/catchup-mapper";
 import { formatChange, formatPrice, projectStock } from "@/lib/nazar/signal-engine";
-import { mapCatchupResponseToStockRecords, nazarApi, useCatchup } from "@/lib/nazar/use-catchup";
-import type { DisplayStock, Signal, StockRecord } from "@/lib/nazar/types";
-
-const MAX_REPLAY_INDEX = demoStocks[0].series.length - 1;
+import { addableStocks } from "@/lib/nazar/stock-catalog";
+import { nazarApi, useCatchup } from "@/lib/nazar/use-catchup";
+import type { DisplayStock } from "@/lib/nazar/types";
 
 export default function NazarDashboard() {
-  const [watchlistId, setWatchlistId] = useState<string | null>(null);
-  const { data: catchup, error: catchupError, loading: catchupLoading } = useCatchup(watchlistId ?? "primary");
-  const [stocks, setStocks] = useState<StockRecord[]>(demoStocks);
-  const [replayIndex, setReplayIndex] = useState(0);
+  const [requestedWatchlistId, setRequestedWatchlistId] = useState<string | null>(null);
+  const { data: catchup, error: catchupError, loading, refresh } = useCatchup(requestedWatchlistId);
+  const [replayPosition, setReplayPosition] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState("all");
-  const [selected, setSelected] = useState<DisplayStock | null>(null);
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [ruleStock, setRuleStock] = useState<DisplayStock | null>(null);
   const [ruleType, setRuleType] = useState("price_above");
@@ -87,31 +86,38 @@ export default function NazarDashboard() {
   const [reviewed, setReviewed] = useState(false);
   const [noiseOpen, setNoiseOpen] = useState(false);
 
-  useEffect(() => {
-    if (catchup) {
-      setWatchlistId(catchup.watchlist_id);
-      setStocks(mapCatchupResponseToStockRecords(catchup));
-    }
-  }, [catchup]);
+  const stocks = useMemo(
+    () => catchup ? mapCatchupResponse(catchup) : [],
+    [catchup],
+  );
+  const watchlistId = catchup?.watchlist_id ?? requestedWatchlistId ?? "primary";
+  const maxReplayIndex = useMemo(
+    () => Math.max(0, ...stocks.map((stock) => stock.series.length - 1)),
+    [stocks],
+  );
 
   useEffect(() => {
     if (!playing) return;
     const timer = window.setInterval(() => {
-      setReplayIndex((current) => {
-        if (current >= MAX_REPLAY_INDEX) {
+      setReplayPosition((current) => {
+        const position = current ?? maxReplayIndex;
+        if (position >= maxReplayIndex) {
           setPlaying(false);
-          return current;
+          return position;
         }
-        return current + 1;
+        return position + 1;
       });
     }, 700);
     return () => window.clearInterval(timer);
-  }, [playing]);
+  }, [maxReplayIndex, playing]);
+
+  const replayIndex = replayPosition ?? maxReplayIndex;
 
   const projected = useMemo(
     () => stocks.map((stock) => projectStock(stock, replayIndex)),
     [stocks, replayIndex],
   );
+  const selected = projected.find((stock) => stock.symbol === selectedSymbol) ?? null;
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -134,25 +140,32 @@ export default function NazarDashboard() {
     unavailable: projected.filter((stock) => stock.group === "unavailable").length,
   }), [projected]);
 
-  const replayTime = projected[0]?.times[Math.min(replayIndex, MAX_REPLAY_INDEX)] ?? "--:--";
+  const replayTime = stocks[0]?.times[Math.min(replayIndex, maxReplayIndex)] ?? "11:15";
+  const surpriseSignal = selected?.visibleSignals.find(
+    (signal) => signal.kind === "sector_surprise" && signal.percentile != null,
+  );
 
   function resetReplay() {
     setPlaying(false);
-    setReplayIndex(0);
+    setReplayPosition(0);
     setReviewed(false);
     toast("Replay reset to your last review");
   }
 
   async function markReviewed() {
+    if (!catchup) return;
     try {
       await nazarApi("/api/watchlists/me/acknowledge", {
         method: "POST",
         body: JSON.stringify({
-          watchlist_id: watchlistId ?? catchup?.watchlist_id ?? "primary",
-          evaluated_through: catchup?.evaluated_through ?? new Date().toISOString(),
+          watchlist_id: watchlistId,
+          evaluated_through: catchup.evaluated_through,
         }),
       });
+      setPlaying(false);
+      setReplayPosition(0);
       setReviewed(true);
+      refresh();
       toast.success("Watchlist reviewed", {
         description: "The backend watermark moved after your acknowledgement.",
       });
@@ -165,39 +178,27 @@ export default function NazarDashboard() {
     const candidate = addableStocks.find((item) => item.symbol === symbol);
     if (!candidate || stocks.some((stock) => stock.symbol === symbol)) return;
     try {
-      let activeWatchlistId = watchlistId;
+      let activeWatchlistId = catchup?.watchlist_id;
       if (!activeWatchlistId) {
-        const created = await nazarApi("/api/watchlists", {
+        const created = await nazarApi<{ watchlist_id: string }>("/api/watchlists", {
           method: "POST",
           body: JSON.stringify({ name: "My watchlist" }),
         });
-        activeWatchlistId = created.watchlist_id;
-        setWatchlistId(activeWatchlistId);
+        const createdId = String(created.watchlist_id);
+        activeWatchlistId = createdId;
+        setRequestedWatchlistId(createdId);
       }
-      const added = await nazarApi(`/api/watchlists/${activeWatchlistId}/items`, {
+      if (!activeWatchlistId) throw new Error("Watchlist was not created");
+      await nazarApi(`/api/watchlists/${activeWatchlistId}/items`, {
         method: "POST",
         body: JSON.stringify({
           symbol: candidate.symbol,
           company_name: candidate.company,
-          sector_index: candidate.sector.includes("Technology") ? "NIFTY IT" : "NIFTY 50",
+          sector_index: candidate.sectorIndex,
         }),
       });
-      const next: StockRecord = {
-        itemId: added.item_id,
-        symbol: candidate.symbol,
-        company: candidate.company,
-        sector: candidate.sector,
-        sectorIndex: candidate.sector.includes("Technology") ? "NIFTY IT" : "NIFTY 50",
-        baseline: candidate.price,
-        series: Array.from({ length: 12 }, (_, index) => candidate.price * (1 + index * 0.00015)),
-        times: demoStocks[0].times,
-        dataState: "fresh",
-        lastUpdated: "Now",
-        signals: [],
-        narrative: "Tracking starts now. Nazar needs a completed interval before it can assess surprise.",
-      };
-      setStocks((current) => [...current, next]);
       setAddOpen(false);
+      refresh();
       toast.success(`${symbol} added`, { description: "Saved to your watchlist." });
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Could not add stock");
@@ -210,36 +211,32 @@ export default function NazarDashboard() {
       return;
     }
     const value = Number(ruleValue);
-    const isVolume = ruleType === "volume_pace";
-    const crossed = isVolume
-      ? value <= 1.86
-      : ruleType === "price_above"
-        ? ruleStock.currentPrice >= value
-        : ruleStock.currentPrice <= value;
 
     try {
       await nazarApi(`/api/watchlists/items/${ruleStock.itemId ?? ruleStock.symbol}/rules`, {
         method: "POST",
         body: JSON.stringify({ rule_type: ruleType, threshold: value }),
       });
-      if (crossed) {
-        const signal: Signal = {
-        id: `${ruleStock.symbol}-${Date.now()}`,
-        kind: "personal_rule",
-        label: isVolume ? `Volume pace crossed ${value.toFixed(1)}×` : `Crossed your ${formatPrice(value)} level`,
-        detail: "Confirmed from fresh minute candles in this review interval",
-        tone: "violet",
-        triggerIndex: replayIndex,
-      };
-        setStocks((current) => current.map((stock) => stock.symbol === ruleStock.symbol ? { ...stock, signals: [...stock.signals, signal] } : stock));
-        toast.success("Rule saved and already crossed");
-      } else {
-        toast.success("Rule saved", { description: "It has not been crossed in this interval." });
-      }
       setRuleStock(null);
       setRuleValue("");
+      refresh();
+      toast.success("Rule saved", { description: "The backend recalculated this review interval." });
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Could not save rule");
+    }
+  }
+
+  async function removeStock(stock: DisplayStock) {
+    if (!stock.itemId) return;
+    try {
+      await nazarApi(`/api/watchlists/items/${encodeURIComponent(stock.itemId)}`, {
+        method: "DELETE",
+      });
+      setSelectedSymbol(null);
+      refresh();
+      toast.success(`${stock.symbol} removed`);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not remove stock");
     }
   }
 
@@ -265,14 +262,14 @@ export default function NazarDashboard() {
         <div className="mt-7 px-6"><p className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Your watchlist</p></div>
         <div className="mt-3 flex-1 overflow-y-auto px-3 pb-4">
           {projected.slice(0, 8).map((stock) => (
-            <button key={stock.symbol} onClick={() => setSelected(stock)} className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-slate-300 hover:bg-white/5">
+            <button key={stock.symbol} onClick={() => setSelectedSymbol(stock.symbol)} className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-slate-300 hover:bg-white/5">
               <span>{stock.symbol}</span>
               <span className={`size-1.5 rounded-full ${stock.group === "attention" ? "bg-[#b8ff65]" : stock.group === "unavailable" ? "bg-rose-400" : "bg-slate-600"}`} />
             </button>
           ))}
         </div>
         <div className="border-t border-white/10 p-4">
-          <div className="rounded-xl bg-white/5 p-3"><p className="text-xs font-semibold">Recorded demo feed</p><p className="mt-1 text-xs leading-5 text-slate-400">Illustrative values—not live market data.</p></div>
+          <div className="rounded-xl bg-white/5 p-3"><p className="text-xs font-semibold">{catchup?.source === "groww" ? "Groww market feed" : "Recorded replay feed"}</p><p className="mt-1 text-xs leading-5 text-slate-400">Evidence is calculated by the API signal engine.</p></div>
         </div>
       </aside>
 
@@ -283,18 +280,19 @@ export default function NazarDashboard() {
               <div className="grid size-9 place-items-center rounded-xl bg-[#0b1020] text-[#b8ff65] lg:hidden"><Eye className="size-5" /></div>
               <div>
                 <h1 className="text-xl font-black tracking-[-0.03em]">Your market catch-up</h1>
-                <p className="text-sm text-slate-500">Since Friday, 11:15 IST · {replayIndex * 15} trading minutes</p>
+                <p className="text-sm text-slate-500">Since your last review · {replayIndex * 15} trading minutes shown</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Badge variant="outline" className={`hidden sm:inline-flex ${catchupError ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>{catchupLoading ? "Connecting..." : catchupError ? "Demo fallback · backend unavailable" : "Backend connected"} · {replayTime} IST</Badge>
+              <Badge variant="outline" className="hidden border-amber-200 bg-amber-50 text-amber-800 sm:inline-flex">{loading ? "Connecting" : catchupError ? "Backend unavailable" : catchup?.source === "replay" ? "Replay connected" : "Live connected"} · {replayTime} IST</Badge>
               <Button variant="outline" className="rounded-xl bg-white" onClick={() => setAddOpen(true)}><Plus /> Add stock</Button>
-              <Button className="rounded-xl bg-[#0b1020] text-white hover:bg-[#1b2440]" onClick={markReviewed} disabled={reviewed}><ShieldCheck /> {reviewed ? "Reviewed" : "Mark reviewed"}</Button>
+              <Button className="rounded-xl bg-[#0b1020] text-white hover:bg-[#1b2440]" onClick={markReviewed} disabled={reviewed || !catchup || loading}><ShieldCheck /> {reviewed ? "Reviewed" : "Mark reviewed"}</Button>
             </div>
           </div>
         </header>
 
         <div className="mx-auto max-w-[1460px] px-4 py-6 sm:px-7 lg:px-10 lg:py-8">
+          {catchupError && <section className="mb-6 flex flex-col gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-rose-900 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-bold">Market API is unavailable</p><p className="mt-1 text-sm text-rose-700">{catchupError}. Start the FastAPI service or check NEXT_PUBLIC_API_BASE.</p></div><Button variant="outline" className="border-rose-300 bg-white" onClick={refresh}>Retry</Button></section>}
           <section className="relative overflow-hidden rounded-3xl bg-[#111831] p-5 text-white shadow-[0_24px_80px_rgba(15,23,42,0.18)] sm:p-7">
             <div className="absolute -right-20 -top-24 size-72 rounded-full border border-[#b8ff65]/20" />
             <div className="absolute -right-8 -top-12 size-44 rounded-full border border-[#b8ff65]/30" />
@@ -312,13 +310,13 @@ export default function NazarDashboard() {
               </div>
               <div className="rounded-2xl border border-white/10 bg-white/[0.07] p-4 backdrop-blur">
                 <div className="flex items-center justify-between">
-                  <div><p className="text-sm font-bold">Friday market replay</p><p className="text-xs text-slate-400">Drag through the interval</p></div>
+                  <div><p className="text-sm font-bold">Market interval replay</p><p className="text-xs text-slate-400">Drag through the interval</p></div>
                   <div className="flex gap-1">
                     <Button size="icon-sm" variant="ghost" className="text-white hover:bg-white/10 hover:text-white" onClick={resetReplay} aria-label="Reset replay"><RotateCcw /></Button>
                     <Button size="icon-sm" className="bg-[#b8ff65] text-[#0b1020] hover:bg-[#a8ef58]" onClick={() => setPlaying((value) => !value)} aria-label={playing ? "Pause replay" : "Play replay"}>{playing ? <Pause /> : <Play />}</Button>
                   </div>
                 </div>
-                <Slider className="mt-5" min={0} max={MAX_REPLAY_INDEX} step={1} value={[replayIndex]} onValueChange={(value) => { setPlaying(false); setReplayIndex(value[0] ?? 0); }} />
+                <Slider className="mt-5" min={0} max={maxReplayIndex} step={1} value={[Math.min(replayIndex, maxReplayIndex)]} onValueChange={(value) => { setPlaying(false); setReplayPosition(value[0] ?? 0); }} />
                 <div className="mt-3 flex items-center justify-between text-xs text-slate-400"><span>Last reviewed · 11:15</span><span className="font-bold text-white">{replayTime} IST</span></div>
               </div>
             </div>
@@ -342,7 +340,7 @@ export default function NazarDashboard() {
           {groups.attention.length > 0 && (
             <section className="mt-7">
               <div className="mb-4 flex items-end justify-between"><div><p className="text-xs font-bold uppercase tracking-[0.16em] text-violet-600">Needs attention</p><h2 className="mt-1 text-xl font-black tracking-tight">Signals with evidence</h2></div><p className="hidden text-sm text-slate-500 sm:block">No predictions. No combined score.</p></div>
-              <div className="grid gap-4 xl:grid-cols-2">{groups.attention.map((stock) => <StockCard key={stock.symbol} stock={stock} onInspect={setSelected} onAddRule={setRuleStock} />)}</div>
+              <div className="grid gap-4 xl:grid-cols-2">{groups.attention.map((stock) => <StockCard key={stock.symbol} stock={stock} onInspect={(item) => setSelectedSymbol(item.symbol)} onAddRule={setRuleStock} />)}</div>
             </section>
           )}
 
@@ -353,7 +351,7 @@ export default function NazarDashboard() {
                 <ChevronDown className={`size-5 text-slate-400 transition ${noiseOpen ? "rotate-180" : ""}`} />
               </CollapsibleTrigger>
               <CollapsibleContent>
-                <div className="grid gap-4 border-t border-slate-100 p-4 xl:grid-cols-2">{groups.normal.map((stock) => <StockCard key={stock.symbol} stock={stock} onInspect={setSelected} onAddRule={setRuleStock} />)}</div>
+                <div className="grid gap-4 border-t border-slate-100 p-4 xl:grid-cols-2">{groups.normal.map((stock) => <StockCard key={stock.symbol} stock={stock} onInspect={(item) => setSelectedSymbol(item.symbol)} onAddRule={setRuleStock} />)}</div>
               </CollapsibleContent>
             </Collapsible>
           )}
@@ -361,7 +359,7 @@ export default function NazarDashboard() {
           {groups.unavailable.length > 0 && (
             <section className="mt-8">
               <div className="mb-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-rose-600">Data unavailable</p><h2 className="mt-1 text-xl font-black tracking-tight">Separated from live attention</h2></div>
-              <div className="grid gap-4 xl:grid-cols-2">{groups.unavailable.map((stock) => <StockCard key={stock.symbol} stock={stock} onInspect={setSelected} onAddRule={setRuleStock} />)}</div>
+              <div className="grid gap-4 xl:grid-cols-2">{groups.unavailable.map((stock) => <StockCard key={stock.symbol} stock={stock} onInspect={(item) => setSelectedSymbol(item.symbol)} onAddRule={setRuleStock} />)}</div>
             </section>
           )}
 
@@ -369,7 +367,7 @@ export default function NazarDashboard() {
         </div>
       </main>
 
-      <Sheet open={!!selected} onOpenChange={(open) => !open && setSelected(null)}>
+      <Sheet open={!!selected} onOpenChange={(open) => !open && setSelectedSymbol(null)}>
         <SheetContent className="w-full overflow-y-auto border-slate-200 bg-white sm:max-w-xl">
           {selected && (
             <>
@@ -391,13 +389,8 @@ export default function NazarDashboard() {
                 </div>
                 <div className="mt-6 rounded-2xl border border-slate-200 p-4"><div className="flex items-center gap-2 text-sm font-bold"><Info className="size-4 text-violet-600" /> What happened</div><p className="mt-2 text-sm leading-6 text-slate-600">{selected.narrative}</p></div>
                 <div className="mt-6"><h3 className="text-sm font-black uppercase tracking-[0.12em] text-slate-400">Evidence receipt</h3><div className="mt-3 grid gap-2">{selected.visibleSignals.length ? selected.visibleSignals.map((signal) => <SignalBadge key={signal.id} signal={signal} />) : <div className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500">No signal crossed its visible threshold in this interval.</div>}</div></div>
-                {selected.visibleSignals.filter((signal) => signal.kind === "sector_surprise").map((signal) => {
-                  const match = signal.detail.match(/(\d+(?:\.\d+)?)th percentile(?: across (\d+) observations)?/);
-                  if (!match) return null;
-                  const percentile = Number(match[1]);
-                  const observations = match[2] ?? "available";
-                  return <div key={signal.id} className="mt-6 rounded-2xl border border-slate-200 p-4"><div className="flex items-center justify-between text-sm"><span className="font-semibold">Historical surprise percentile</span><span className="font-black">{percentile}%</span></div><Progress value={percentile} className="mt-3 bg-slate-100 [&_[data-slot=progress-indicator]]:bg-violet-600" /><p className="mt-3 text-xs leading-5 text-slate-500">Compared with {observations} valid sector-relative observations from the backend response.</p></div>;
-                })}
+                {surpriseSignal?.percentile != null && <div className="mt-6 rounded-2xl border border-slate-200 p-4"><div className="flex items-center justify-between text-sm"><span className="font-semibold">Historical surprise percentile</span><span className="font-black">{surpriseSignal.percentile.toFixed(1)}%</span></div><Progress value={surpriseSignal.percentile} className="mt-3 bg-slate-100 [&_[data-slot=progress-indicator]]:bg-violet-600" /><p className="mt-3 text-xs leading-5 text-slate-500">Compared with {surpriseSignal.observationCount ?? "available"} valid sector-relative observations for the selected trading-time horizon.</p></div>}
+                {selected.itemId && <Button variant="outline" className="mt-6 w-full border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800" onClick={() => removeStock(selected)}><Trash2 /> Remove from watchlist</Button>}
               </div>
             </>
           )}

@@ -1,6 +1,6 @@
 export type SignalKind = "personal_rule" | "sector_surprise" | "path_event";
 
-export type DataState = "fresh" | "market_closed" | "unavailable";
+export type DataState = "fresh" | "market_closed" | "unavailable" | "limited_history";
 
 export type Signal = {
   id: string;
@@ -9,6 +9,10 @@ export type Signal = {
   detail: string;
   tone: "violet" | "blue" | "amber";
   triggerIndex: number;
+  occurredAt?: string | null;
+  percentile?: number | null;
+  observationCount?: number | null;
+  direction?: string | null;
 };
 
 export type StockRecord = {
@@ -24,6 +28,7 @@ export type StockRecord = {
   lastUpdated: string;
   signals: Signal[];
   narrative: string;
+  source?: "replay" | "groww";
 };
 
 export type WatchlistGroup = "attention" | "normal" | "unavailable";

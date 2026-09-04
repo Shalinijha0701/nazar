@@ -23,9 +23,10 @@ compared with a distribution that had at least as much time to move. If
 signals cover the trailing five sessions and the response is labelled
 `partial_coverage`; personal rules still inspect the full available interval.
 
-Historical intraday observations use the same session-start offset as `t0`.
-At least 120 valid observations are required; 252 is preferred. Overlapping
-observations are allowed for the hackathon MVP and disclosed in the README.
+Historical observations use the same trading-time horizon and pool valid
+session-start offsets. At least 120 observations are required; 252 is
+preferred. Rolling windows may overlap in the MVP, so the percentile is
+descriptive rather than an independent-sample probability.
 
 ## 1. Personal rule
 
@@ -104,6 +105,57 @@ percentile event at or above 95, preserving its minute timestamp and direction.
    feed becomes stale at 12:10 -> keep the confirmed event in
    `data_unavailable`, generate no later signals, and do not rank the stock in
    the live attention group.
+
+## Catch-up API contract
+
+`GET /api/watchlists/me/catchup` derives the user from the bearer token. The
+response keeps unavailable items outside the attention ranking even when they
+contain a previously confirmed event.
+
+```json
+{
+  "watchlist_id": "primary",
+  "source": "replay",
+  "reviewed_through": "2026-09-04T05:45:00Z",
+  "evaluated_through": "2026-09-04T08:30:00Z",
+  "trading_minutes": 165,
+  "horizon_minutes": 240,
+  "coverage": "full",
+  "counts": {
+    "attention": 3,
+    "normal": 5,
+    "data_unavailable": 2
+  },
+  "attention": [
+    {
+      "item_id": "primary:RELIANCE",
+      "symbol": "RELIANCE",
+      "company_name": "Reliance Industries",
+      "sector_index": "NIFTY50",
+      "current_price": 2847.9,
+      "baseline_price": 2789.2,
+      "change_since_review_percent": 2.1,
+      "data_state": "fresh",
+      "last_updated_at": "2026-09-04T08:30:00Z",
+      "narrative": "Reliance separated from the broad market and retained most of its move.",
+      "chart": [{ "timestamp": "2026-09-04T05:45:00Z", "price": 2789.2 }],
+      "signals": [
+        {
+          "kind": "sector_surprise",
+          "label": "97.6th percentile relative to sector",
+          "occurred_at": "2026-09-04T08:30:00Z",
+          "percentile": 97.6,
+          "observation_count": 252,
+          "direction": "above_sector",
+          "evidence": { "horizon_minutes": 240 }
+        }
+      ]
+    }
+  ],
+  "normal": [],
+  "data_unavailable": []
+}
+```
 
 ## Remaining explicit MVP limits
 

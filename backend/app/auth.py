@@ -17,10 +17,13 @@ def supabase_client() -> Client:
 def authenticated_user(authorization: str | None, settings: Settings) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authentication required")
-    if settings.auth_mode == "demo":
-        return "demo-user"
 
     token = authorization.removeprefix("Bearer ").strip()
+    if settings.auth_mode == "demo":
+        if token != settings.demo_token:
+            raise HTTPException(status_code=401, detail="Invalid demo token")
+        return "demo-user"
+
     try:
         response = supabase_client().auth.get_user(token)
     except Exception as exc:

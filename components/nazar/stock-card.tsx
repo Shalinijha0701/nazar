@@ -65,9 +65,7 @@ export function StockCard({ stock, onInspect, onAddRule }: StockCardProps) {
             <DataBadge stock={stock} />
           </div>
           <div className="flex items-center gap-3">
-            <span className="hidden text-xs text-slate-400 sm:inline">
-              Since Fri 11:15 IST
-            </span>
+            <span className="hidden text-xs text-slate-400 sm:inline">Since last review</span>
             <span className="text-xs font-semibold text-slate-400 transition group-hover:text-slate-700">
               View evidence →
             </span>

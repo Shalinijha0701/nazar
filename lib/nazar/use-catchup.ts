@@ -1,120 +1,67 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { demoStocks } from "./demo-data";
-import type { DataState, Signal, StockRecord } from "./types";
+import type { CatchupResponse } from "./catchup-mapper";
 
-type CatchupSignal = {
-  kind: Signal["kind"];
-  label: string;
-  occurred_at?: string | null;
-  percentile?: number | null;
-  evidence?: Record<string, number | string>;
-};
-
-type CatchupCard = {
-  symbol: string;
-  company_name: string;
-  current_price: number | null;
-  change_since_review_percent: number | null;
-  data_state: DataState;
-  last_updated_at: string | null;
-  signals: CatchupSignal[];
-  candles?: Array<{ interval_start: string; close: number }>;
-  narrative?: string | null;
-};
-
-export type CatchupResponse = {
-  watchlist_id: string;
-  reviewed_through: string;
-  evaluated_through: string;
-  counts: Record<string, number>;
-  attention: CatchupCard[];
-  normal: CatchupCard[];
-  data_unavailable: CatchupCard[];
-  trading_minutes: number;
-  coverage: string;
-};
 
 const apiBase = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/$/, "");
+const demoToken = process.env.NEXT_PUBLIC_DEMO_TOKEN ?? "demo-token";
 
-export function mapCatchupResponseToStockRecords(data: CatchupResponse): StockRecord[] {
-  const cards = [...data.attention, ...data.normal, ...data.data_unavailable];
-  return cards.map((card) => {
-    const fallback = demoStocks.find((stock) => stock.symbol === card.symbol);
-    const candles = card.candles ?? [];
-    const baseline = candles[0]?.close ?? fallback?.baseline ?? card.current_price ?? 0;
-    const current = card.current_price ?? baseline;
-    const nextSeries = candles.length > 0 ? candles.map((candle) => candle.close) : [...(fallback?.series ?? [baseline, current])];
-    if (candles.length === 0) nextSeries[nextSeries.length - 1] = current;
-    const times = candles.length > 0
-      ? candles.map((candle) => new Date(candle.interval_start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }))
-      : fallback?.times ?? ["Review", "Now"];
 
-    return {
-      symbol: card.symbol,
-      company: card.company_name,
-      sector: fallback?.sector ?? card.symbol,
-      sectorIndex: fallback?.sectorIndex ?? "NIFTY 50",
-      baseline,
-      series: nextSeries,
-      times,
-      dataState: card.data_state,
-      lastUpdated: card.last_updated_at ? new Date(card.last_updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Unknown",
-      signals: card.signals.map((signal, index) => ({
-        id: `${card.symbol}-${signal.kind}-${index}`,
-        kind: signal.kind,
-        label: signal.label,
-        detail: signal.percentile != null
-          ? `${signal.percentile.toFixed(1)}th percentile${signal.evidence?.observation_count ? ` across ${signal.evidence.observation_count} observations` : ""}`
-          : "Confirmed from the backend signal pipeline",
-        tone: signal.kind === "personal_rule" ? "violet" : signal.kind === "sector_surprise" ? "blue" : "amber",
-        triggerIndex: signal.occurred_at
-          ? Math.max(0, candles.findIndex((candle) => candle.interval_start === signal.occurred_at))
-          : nextSeries.length - 1,
-      })),
-      narrative: card.narrative ?? "The backend returned this watchlist observation.",
-    };
-  });
-}
-
-export function useCatchup(watchlistId = "primary") {
+export function useCatchup(watchlistId?: string | null) {
   const [data, setData] = useState<CatchupResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [requestVersion, setRequestVersion] = useState(0);
+
+  const refresh = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    setRequestVersion((version) => version + 1);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${apiBase}/api/watchlists/me/catchup?watchlist_id=${encodeURIComponent(watchlistId)}`, {
-      headers: { Authorization: "Bearer demo-token" },
+    const query = watchlistId ? "?watchlist_id=" + encodeURIComponent(watchlistId) : "";
+    fetch(apiBase + "/api/watchlists/me/catchup" + query, {
+      headers: { Authorization: "Bearer " + demoToken },
       signal: controller.signal,
     })
-      .then((response) => {
-        if (!response.ok) throw new Error("backend unavailable");
+      .then(async (response) => {
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          throw new Error(payload?.detail ?? "Backend unavailable");
+        }
         return response.json() as Promise<CatchupResponse>;
       })
       .then(setData)
       .catch((cause: Error) => {
         if (cause.name !== "AbortError") setError(cause.message);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
 
     return () => controller.abort();
-  }, [watchlistId]);
+  }, [requestVersion, watchlistId]);
 
-  return { data, error, loading };
+  return { data, error, loading, refresh };
 }
 
-export async function nazarApi(path: string, init?: RequestInit) {
-  const response = await fetch(`${apiBase}${path}`, {
+
+export async function nazarApi<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(apiBase + path, {
     ...init,
     headers: {
-      Authorization: "Bearer demo-token",
+      Authorization: "Bearer " + demoToken,
       "Content-Type": "application/json",
       ...init?.headers,
     },
   });
-  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail ?? "Nazar API request failed");
-  return response.json();
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail ?? "Nazar API request failed");
+  }
+  return response.json() as Promise<T>;
 }

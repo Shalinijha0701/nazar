@@ -3,7 +3,9 @@ import type { DisplayStock, StockRecord } from "./types";
 export function projectStock(stock: StockRecord, replayIndex: number): DisplayStock {
   const boundedIndex = Math.max(0, Math.min(replayIndex, stock.series.length - 1));
   const currentPrice = stock.series[boundedIndex];
-  const changePercent = ((currentPrice - stock.baseline) / stock.baseline) * 100;
+  const changePercent = stock.baseline > 0
+    ? ((currentPrice - stock.baseline) / stock.baseline) * 100
+    : 0;
   const visibleSignals = stock.signals.filter(
     (signal) => signal.triggerIndex <= boundedIndex,
   );

@@ -1,47 +1,41 @@
+import asyncio
 from datetime import UTC, datetime
+from functools import partial
+import logging
 from typing import Sequence
+from zoneinfo import ZoneInfo
 
-import httpx
+from growwapi import GrowwAPI
 
 from app.models import Candle
 
 
+INDIA_TZ = ZoneInfo("Asia/Kolkata")
+logger = logging.getLogger(__name__)
+
+
 class GrowwProvider:
-    """Small adapter around Groww market-data endpoints.
-
-    Order endpoints are intentionally excluded: Nazar observes and explains;
-    it never places trades.
-    """
-
-    def __init__(self, access_token: str, base_url: str = "https://api.groww.in/v1"):
-        self._base_url = base_url.rstrip("/")
-        self._headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json",
-            "X-API-VERSION": "1.0",
-        }
+    def __init__(self, access_token: str) -> None:
+        if not access_token:
+            raise ValueError("Groww access token is required")
+        self._client = GrowwAPI(access_token)
 
     async def latest_prices(self, symbols: Sequence[str]) -> dict[str, float]:
-        if not symbols:
-            return {}
-        params = {
-            "segment": "CASH",
-            "exchange_symbols": ",".join(f"NSE_{symbol}" for symbol in symbols),
-        }
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(
-                f"{self._base_url}/live-data/ltp",
-                params=params,
-                headers=self._headers,
-            )
-            response.raise_for_status()
-            payload = response.json().get("payload", {})
-
         prices: dict[str, float] = {}
-        for symbol in symbols:
-            raw = payload.get(f"NSE_{symbol}")
-            if raw is not None:
-                prices[symbol] = float(raw)
+        for offset in range(0, len(symbols), 50):
+            batch = symbols[offset : offset + 50]
+            exchange_symbols = tuple(f"NSE_{self._trading_symbol(symbol)}" for symbol in batch)
+            payload = await asyncio.to_thread(
+                partial(
+                    self._client.get_ltp,
+                    segment=self._client.SEGMENT_CASH,
+                    exchange_trading_symbols=exchange_symbols,
+                )
+            )
+            for symbol in batch:
+                value = payload.get(f"NSE_{self._trading_symbol(symbol)}")
+                if value is not None:
+                    prices[symbol] = float(value)
         return prices
 
     async def candles(
@@ -51,35 +45,72 @@ class GrowwProvider:
         end: datetime,
         interval: str = "1minute",
     ) -> dict[str, list[Candle]]:
-        # Historical request shapes can change independently of the domain.
-        # Keep that translation isolated here and normalize before returning.
-        result: dict[str, list[Candle]] = {}
-        async with httpx.AsyncClient(timeout=20) as client:
-            for symbol in symbols:
-                response = await client.get(
-                    f"{self._base_url}/historical/candle/range",
-                    params={
-                        "exchange": "NSE",
-                        "segment": "CASH",
-                        "trading_symbol": symbol,
-                        "start_time": start.isoformat(),
-                        "end_time": end.isoformat(),
-                        "interval_in_minutes": 1,
-                    },
-                    headers=self._headers,
-                )
-                response.raise_for_status()
-                rows = response.json().get("payload", {}).get("candles", [])
-                result[symbol] = [
-                    Candle(
+        interval_map = {
+            "1minute": self._client.CANDLE_INTERVAL_MIN_1,
+            "5minute": self._client.CANDLE_INTERVAL_MIN_5,
+            "15minute": self._client.CANDLE_INTERVAL_MIN_15,
+            "30minute": self._client.CANDLE_INTERVAL_MIN_30,
+        }
+        if interval not in interval_map:
+            raise ValueError(f"Unsupported candle interval: {interval}")
+
+        semaphore = asyncio.Semaphore(8)
+
+        async def load(symbol: str) -> tuple[str, list[Candle]]:
+            async with semaphore:
+                try:
+                    payload = await asyncio.to_thread(
+                        partial(
+                            self._client.get_historical_candles,
+                            exchange=self._client.EXCHANGE_NSE,
+                            segment=self._client.SEGMENT_CASH,
+                            groww_symbol=f"NSE-{self._trading_symbol(symbol)}",
+                            start_time=self._format_time(start),
+                            end_time=self._format_time(end),
+                            candle_interval=interval_map[interval],
+                        )
+                    )
+                except Exception:
+                    logger.warning("Groww candle request failed for %s", symbol, exc_info=True)
+                    return symbol, []
+
+                by_timestamp: dict[datetime, Candle] = {}
+                for row in payload.get("candles", []):
+                    timestamp = self._parse_timestamp(row[0])
+                    by_timestamp[timestamp] = Candle(
                         symbol=symbol,
-                        interval_start=datetime.fromtimestamp(row[0] / 1000, tz=UTC),
+                        interval_start=timestamp,
                         open=float(row[1]),
                         high=float(row[2]),
                         low=float(row[3]),
                         close=float(row[4]),
-                        volume=int(row[5]),
+                        volume=int(row[5] or 0),
                     )
-                    for row in rows
-                ]
-        return result
+                return symbol, [by_timestamp[key] for key in sorted(by_timestamp)]
+
+        loaded = await asyncio.gather(*(load(symbol) for symbol in symbols))
+        return dict(loaded)
+
+    @staticmethod
+    def _trading_symbol(symbol: str) -> str:
+        aliases = {
+            "NIFTY50": "NIFTY",
+            "NIFTY_BANK": "BANKNIFTY",
+            "NIFTY_IT": "NIFTYIT",
+        }
+        return aliases.get(symbol, symbol)
+
+    @staticmethod
+    def _format_time(value: datetime) -> str:
+        localized = value.astimezone(INDIA_TZ)
+        return localized.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _parse_timestamp(raw: object) -> datetime:
+        if isinstance(raw, (int, float)):
+            seconds = float(raw) / 1000 if float(raw) > 10_000_000_000 else float(raw)
+            return datetime.fromtimestamp(seconds, tz=UTC)
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=INDIA_TZ)
+        return parsed.astimezone(UTC)

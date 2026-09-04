@@ -1,83 +1,54 @@
 # Nazar
 
-Live frontend: `https://your-production-domain.vercel.app`  
-API health: `https://your-api.vercel.app/health`  
-60-second demo: open the dashboard, inspect INFY evidence, add a stock or rule, press **Mark reviewed**, then refresh to verify acknowledged events disappear.
+Nazar is a smart market watchlist that explains what changed while a user was away. It treats personal rules, sector-relative surprise, and intraday path events as independent signals, so every alert has a clear reason instead of an opaque score.
 
-## 100-word product pitch
+## Product model
 
-Nazar is a market catch-up watchlist for people who return after the market has moved. It separates meaningful evidence from ordinary noise: personal price or volume rules, unusual sector-relative movement, and spikes or reversals hidden by the final price. Every signal includes its timestamp, observed candles, percentile, and comparison count, so users can trace the calculation instead of trusting a score. Nazar does not predict prices or recommend trades. The recorded replay makes the demo deterministic and inspectable, while the API contract supports persistent watchlists and future live ingestion. It is a calm, explainable layer between market movement and human attention.
+- **Personal rule:** detects a price crossing or unusual same-time-of-day volume pace.
+- **Sector surprise:** ranks the stock's sector-relative return against its own historical distribution.
+- **Path event:** preserves a rare spike or reversal even when the closing price hides it.
+- **Review watermark:** advances only after a successful catch-up and explicit acknowledgement.
+- **Data quality:** keeps stale, closed-market, and limited-history states separate from ranked attention.
 
-Nazar is a market catch-up watchlist. It does not predict prices or recommend
-trades. It tells a returning user whether a personal condition was crossed,
-whether a stock moved unusually relative to its sector, or whether a meaningful
-spike or reversal happened while the user was away.
+The replay feed is deterministic and uses the same signal functions as the API. It is the recommended judging mode because it works outside market hours and does not require private credentials.
 
-The deployed interface calls the FastAPI catch-up endpoint and maps its response
-into the dashboard. If the API is unavailable, it falls back to the labelled
-recorded demo and visibly reports that the backend is unavailable. Values are
-illustrative and are labelled as demo data.
+## Architecture
 
-Watchlist creation, stock additions, personal rules, and acknowledgement are
-API-backed. Replay mode uses an in-process demo watermark; live mode persists
-these records in Supabase.
-
-## Product contract
-
-Three signal families remain independent:
-
-1. **Personal rule:** a price level or historical same-time volume-pace multiple
-   was crossed after `reviewed_through`. Volume pace uses the same-time-of-day
-   historical median, not raw volume, so early-session minutes are not penalised.
-2. **Sector surprise:** the absolute deviation of stock-minus-sector return is
-   ranked against the stock's own comparable historical observations. Stock and
-   sector candles are joined by exact timestamp before computing returns, so
-   illiquid stocks that skip minute candles cannot corrupt the calculation.
-3. **Path event:** minute candles preserve unusual excursions and reversals that
-   a current-price-only watchlist would lose. Both positive and negative
-   excursions are detected; direction is reported separately.
-
-There is no combined score. A stale observation cannot create a new signal.
-Previously confirmed events retain their original timestamp. The complete
-formula and golden test cases live in `docs/functional-spec.md`.
-
-## Demo ↔ signals.py connection
-
-`backend/app/demo.py` builds its catch-up response by calling the same pure
-functions used in production (`signals.py`). The Infosys candle series
-reproduces the Friday replay visible in the UI. The dashboard fetches this
-response from `/api/watchlists/me/catchup`, so judges can trace the calculation
-end-to-end:
-
-```
-INFY replay candles → path_metrics() → peak_to_trough_reversal
-                    → empirical_percentile(reversal, INFY_REVERSAL_HISTORY)
-                    → PathEvent signal with actual percentile
+```text
+Next.js dashboard
+       │
+       ▼
+FastAPI modular monolith
+       ├── watchlist and rule repository
+       ├── signal engine
+       └── market-data provider interface
+              ├── replay provider
+              └── Groww provider
+       │
+       ▼
+PostgreSQL / Supabase
 ```
 
-No signal value in the demo response is hardcoded. Historical distribution
-arrays are seeded deterministically; the signal arithmetic is live.
+Shared market evidence is computed per symbol. Per-user state contains only watchlist membership, personal rules, and the monotonic `reviewed_through` watermark.
 
 ## Repository layout
 
-- `app/` — Next.js-compatible Nazar dashboard.
-- `lib/nazar/` — typed demo data, API client, and presentation-domain projection.
-- `backend/app/` — FastAPI modular monolith with market-provider adapters and
-  pure signal functions.
-- `backend/tests/` — 20 focused golden-path tests for the signal mathematics,
-  including timestamp-alignment and two-sided surprise detection.
-- `supabase/schema.sql` — PostgreSQL tables, ownership policies, indexes, and
-  the atomic monotonic watermark function.
-- `docs/functional-spec.md` — frozen behaviour before implementation.
-
-## Run the interface
-
-```bash
-npm install
-npm run dev
+```text
+app/                    Next.js application
+components/nazar/       Product UI
+lib/nazar/              Typed API mapping and replay projection
+backend/app/            FastAPI application and signal engine
+backend/main.py         Vercel entry point
+backend/tests/          Unit and API integration tests
+supabase/schema.sql     PostgreSQL schema, indexes, RLS, and acknowledgement RPC
+docs/functional-spec.md Frozen formulas, edge cases, and golden cases
 ```
 
-## Run the API
+## Local setup
+
+Requirements: Node.js 22 and Python 3.12.
+
+Start the API:
 
 ```bash
 cd backend
@@ -85,65 +56,80 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8000
 ```
 
-Run backend tests (16 cases):
+On Windows PowerShell, activate the environment with `.venv\Scripts\Activate.ps1`.
+
+Start the dashboard in a second terminal:
 
 ```bash
-PYTHONPATH=backend python -m unittest discover -s backend/tests -v
+npm install
+cp .env.example .env.local
+npm run dev
 ```
 
-## API setup
+Open [http://localhost:3000](http://localhost:3000). The default token is intentionally limited to local replay mode.
 
-1. Apply `supabase/schema.sql` to a Supabase project.
-2. Fill the `NAZAR_SUPABASE_*` values in `backend/.env`.
-3. For a persistent replay deployment set `NAZAR_MARKET_PROVIDER=replay`,
-  `NAZAR_PERSISTENCE=supabase`, and `NAZAR_AUTH_MODE=supabase`. For the
-  standalone demo use `replay`, `memory`, and `demo` respectively. Configure
-  the frontend with `NEXT_PUBLIC_API_BASE=https://your-api.example.com`.
-4. The frontend sends the demo bearer token in replay mode. Replace that client
-  authentication with the deployed identity provider before exposing live data.
+## Configuration
 
-Secrets are never committed. The API obtains the user from the Authorization
-header and does not accept a caller-supplied user ID in watchlist routes
-(prevents IDOR).
+Backend variables use the `NAZAR_` prefix.
 
-`GrowwProvider` implements the market-data adapter interface and is unit-testable
-in isolation. The current submission scope is replay aggregation. Live Groww
-aggregation remains disabled at the route until its provider, trading calendar,
-retries, partial-failure handling, and distribution store are wired end to end;
-the API returns 501 rather than presenting a static replay as live data.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `NAZAR_MARKET_PROVIDER` | `replay` | `replay` or `groww` |
+| `NAZAR_PERSISTENCE_BACKEND` | `memory` | `memory` or `supabase` |
+| `NAZAR_AUTH_MODE` | `demo` | `demo` or `supabase` |
+| `NAZAR_DEMO_TOKEN` | `demo-token` | Replay-only bearer token |
+| `NAZAR_ALLOWED_ORIGINS` | `http://localhost:3000` | Comma-separated CORS origins |
+| `NAZAR_GROWW_ACCESS_TOKEN` | — | Required for the Groww provider |
+| `NAZAR_SUPABASE_URL` | — | Required for Supabase modes |
+| `NAZAR_SUPABASE_SERVICE_ROLE_KEY` | — | Server-only key; never expose in Next.js |
 
-## Deliberate trade-offs
+Frontend variables:
 
-| Decision | Trade-off | Rationale |
-|---|---|---|
-| Conservative ceiling horizon | A 61-minute absence uses the 240-minute bucket | Avoids overstating surprise in a shorter window |
-| Timestamp join for sector surprise | Drops unmatched minutes | Correctness over coverage; illiquid candle gaps cannot corrupt the return |
-| 120-observation minimum | Scoring skipped below | 95th percentile on fewer points is statistically unreliable |
-| Overlapping historical windows | Percentile is descriptive, not an independent-sample probability | Disclosed; acceptable for a 72-hour MVP |
-| Seeded demo distributions | Not a live database query | Replay keeps the signal contract inspectable; live distribution retrieval is next |
-| Five-session statistical horizon max | Longer catch-ups use `partial_coverage` label | Avoids silent degradation for multi-day absences |
+| Variable | Example |
+| --- | --- |
+| `NEXT_PUBLIC_API_BASE` | `http://localhost:8000` |
+| `NEXT_PUBLIC_DEMO_TOKEN` | `demo-token` |
 
-## Scaling considerations
+## Verification
 
-- **Shared ingestion:** market candles and sector indices are ingested once per
-  symbol, not per user. Per-user storage is limited to watchlist items, personal
-  rules and a monotonic reviewed-through watermark.
-- **market_candles partitioning:** next step is PostgreSQL range-partitioning
-  by month on `interval_start` to maintain query speed as candle volume grows.
-- **Trading-minute calculation:** the current demo uses calendar minutes.
-  Production must filter using the NSE holiday calendar to exclude weekends,
-  public holidays and pre/post-market minutes from `h`. A comment in
-  `signals.py` marks this boundary explicitly.
-- **Distribution pre-computation:** `stock_distributions` table and a background
-  worker would replace the seeded arrays. The
-  `select_horizon` / `sector_surprise` / `path_metrics` contract is unchanged.
+```bash
+npm run lint
+npm test
+npm run build
 
-## What Nazar does not do
+cd backend
+python -m unittest discover -s tests -v
+```
 
-- No price prediction or buy/sell advice.
-- No combined weighted score — signals are independent facts.
-- No sentiment or social-media signals.
-- No Kafka, Redis, or microservices in the MVP.
+The backend suite includes deterministic formula tests and full API tests for authentication, grouping, rule creation, item removal, and monotonic acknowledgement.
+
+After one-minute candles have been ingested into Supabase, rebuild stored distributions with:
+
+```bash
+cd backend
+python -m app.jobs.rebuild_distributions --symbol RELIANCE --sector NIFTY50
+```
+
+## Deployment
+
+Deploy two Vercel projects from this repository:
+
+1. **Dashboard:** repository root, Next.js preset. Set `NEXT_PUBLIC_API_BASE` to the API deployment URL and `NEXT_PUBLIC_DEMO_TOKEN` to the same demo token used by the API.
+2. **API:** set the project Root Directory to `backend`. Configure the `NAZAR_*` variables and add the dashboard origin to `NAZAR_ALLOWED_ORIGINS`.
+
+For persistent multi-user operation, apply `supabase/schema.sql`, enable Supabase persistence and authentication together, and keep the service-role key only in the API environment. The included Groww adapter supports live price-rule evaluation. Sector and path statistics remain disabled in live mode until historical distributions have been populated; the UI reports this as limited history instead of fabricating evidence.
+
+## Deliberate scope
+
+- No prediction, recommendation, sentiment model, or combined weighted score.
+- Replay mode is complete and presentation-ready.
+- Live Groww price rules and an on-demand historical-distribution rebuild job are implemented; production scheduling is deployment-specific.
+- Split and bonus adjustments are represented in the schema. Other corporate-action intervals pause statistical scoring.
+- The application is an engineering prototype, not investment advice.
+
+## 100-word pitch
+
+Nazar is a market watchlist that remembers what happened while you were away. Instead of ranking every price move, it surfaces three independent, explainable signals: a personal price or volume rule, a historically rare sector-relative move, and a spike or reversal that disappeared before you returned. Each alert carries its timestamp, comparison horizon, observation count, and data-quality state. Review watermarks advance only after acknowledgement and remain monotonic across devices. Shared market evidence is computed once per symbol, while stale data and corporate actions are isolated from ranking. The result is a focused catch-up, not another noisy watchlist or prediction engine.
