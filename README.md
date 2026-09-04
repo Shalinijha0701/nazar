@@ -1,6 +1,12 @@
 # Nazar
 
-Nazar is a smart market watchlist that explains what changed while a user was away. It treats personal rules, sector-relative surprise, and intraday path events as independent signals, so every alert has a clear reason instead of an opaque score.
+## Meaningful market change, explained
+
+**Live demo:** [Nazar on Vercel](https://nazar-8lczelyeh-shalinijha1008s-projects.vercel.app/)
+
+Nazar is an explainable market catch-up watchlist built for people who return to the market after being away. It separates meaningful evidence from ordinary price noise and explains why an event matters instead of hiding the reasoning behind an opaque score.
+
+Nazar does not predict prices or recommend trades. Every signal includes its event time, comparison context, observation count, and data-quality state.
 
 ## Product model
 
@@ -11,6 +17,24 @@ Nazar is a smart market watchlist that explains what changed while a user was aw
 - **Data quality:** keeps stale, closed-market, and limited-history states separate from ranked attention.
 
 The replay feed is deterministic and uses the same signal functions as the API. It is the recommended judging mode because it works outside market hours and does not require private credentials.
+
+## What the product demonstrates
+
+- **Personal rules:** price crossings and same-time-of-day volume pace thresholds.
+- **Sector-relative surprise:** stock performance compared with its sector index and historical distribution.
+- **Intraday path events:** unusual spikes, drops, reversals, and recoveries that closing price alone can hide.
+- **Evidence-first UI:** chart data, timestamps, percentiles, narratives, and observation counts come from the backend response.
+- **Review watermark:** acknowledgement advances monotonically and prevents old signals from repeating.
+- **Data quality:** fresh, closed-market, limited-history, stale, and unavailable states remain distinct.
+
+## Hackathon demo flow
+
+1. Open the [live Vercel demo](https://nazar-8lczelyeh-shalinijha1008s-projects.vercel.app/).
+2. Inspect INFY to see the chart, reversal event, percentile, and evidence receipt.
+3. Use the replay controls to show how the event developed during the interval.
+4. Add a stock or personal rule to demonstrate the API-backed workflow.
+5. Click **Mark reviewed**, refresh, and verify that acknowledged events do not repeat.
+6. Point out that the application explains market movement and does not provide predictions or trading advice.
 
 ## Architecture
 
