@@ -5,11 +5,14 @@ trades. It tells a returning user whether a personal condition was crossed,
 whether a stock moved unusually relative to its sector, or whether a meaningful
 spike or reversal happened while the user was away.
 
-The deployed interface runs a deterministic recorded-demo provider so the
-entire judging flow remains available while Indian markets are closed. Values
-are illustrative and are labelled as demo data. `GrowwProvider` is isolated
-behind the same market-data interface and activates only when valid credentials
-are supplied.
+The deployed interface calls the FastAPI catch-up endpoint and maps its response
+into the dashboard. If the API is unavailable, it falls back to the labelled
+recorded demo so the judging flow remains usable. Values are illustrative and
+are labelled as demo data.
+
+Watchlist creation, stock additions, personal rules, and acknowledgement are
+API-backed. Replay mode uses an in-process demo watermark; live mode persists
+these records in Supabase.
 
 ## Product contract
 
@@ -34,8 +37,9 @@ formula and golden test cases live in `docs/functional-spec.md`.
 
 `backend/app/demo.py` builds its catch-up response by calling the same pure
 functions used in production (`signals.py`). The Infosys candle series
-reproduces the Friday replay visible in the UI so judges can trace the
-calculation end-to-end:
+reproduces the Friday replay visible in the UI. The dashboard fetches this
+response from `/api/watchlists/me/catchup`, so judges can trace the calculation
+end-to-end:
 
 ```
 INFY replay candles → path_metrics() → peak_to_trough_reversal
@@ -48,11 +52,11 @@ arrays are seeded deterministically; the signal arithmetic is live.
 
 ## Repository layout
 
-- `app/` — Next.js-compatible Nazar dashboard deployed through Sites.
-- `lib/nazar/` — typed demo data and presentation-domain projection.
+- `app/` — Next.js-compatible Nazar dashboard.
+- `lib/nazar/` — typed demo data, API client, and presentation-domain projection.
 - `backend/app/` — FastAPI modular monolith with market-provider adapters and
   pure signal functions.
-- `backend/tests/` — 16 focused golden-path tests for the signal mathematics,
+- `backend/tests/` — 20 focused golden-path tests for the signal mathematics,
   including timestamp-alignment and two-sided surprise detection.
 - `supabase/schema.sql` — PostgreSQL tables, ownership policies, indexes, and
   the atomic monotonic watermark function.
@@ -82,16 +86,23 @@ Run backend tests (16 cases):
 PYTHONPATH=backend python -m unittest discover -s backend/tests -v
 ```
 
-## Live setup
+## API setup
 
 1. Apply `supabase/schema.sql` to a Supabase project.
 2. Fill the `NAZAR_SUPABASE_*` values in `backend/.env`.
-3. Add a Groww market-data token as `NAZAR_GROWW_ACCESS_TOKEN`.
-4. Set `NAZAR_MODE=live` only after the provider health check succeeds.
+3. Set `NAZAR_MODE=replay` for the complete recorded demo, or configure the
+  frontend with `NEXT_PUBLIC_API_BASE=https://your-api.example.com`.
+4. The frontend sends the demo bearer token in replay mode. Replace that client
+  authentication with the deployed identity provider before exposing live data.
 
 Secrets are never committed. The API obtains the user from the Authorization
 header and does not accept a caller-supplied user ID in watchlist routes
 (prevents IDOR).
+
+`GrowwProvider` implements the market-data adapter interface and is unit-testable
+in isolation. End-to-end live aggregation (route → repository → GrowwProvider →
+`signals.py`) is the next milestone; replay mode demonstrates the complete
+signal pipeline against recorded data.
 
 ## Deliberate trade-offs
 
@@ -101,7 +112,7 @@ header and does not accept a caller-supplied user ID in watchlist routes
 | Timestamp join for sector surprise | Drops unmatched minutes | Correctness over coverage; illiquid candle gaps cannot corrupt the return |
 | 120-observation minimum | Scoring skipped below | 95th percentile on fewer points is statistically unreliable |
 | Overlapping historical windows | Percentile is descriptive, not an independent-sample probability | Disclosed; acceptable for a 72-hour MVP |
-| Seeded demo distributions | Not a live database query | Architecture contract is production-ready; seeding is the only MVP limit |
+| Seeded demo distributions | Not a live database query | Replay keeps the signal contract inspectable; live distribution retrieval is next |
 | Five-session statistical horizon max | Longer catch-ups use `partial_coverage` label | Avoids silent degradation for multi-day absences |
 
 ## Scaling considerations
@@ -116,7 +127,7 @@ header and does not accept a caller-supplied user ID in watchlist routes
   public holidays and pre/post-market minutes from `h`. A comment in
   `signals.py` marks this boundary explicitly.
 - **Distribution pre-computation:** `stock_distributions` table and a background
-  worker (scaffolded in `worker/`) would replace the seeded arrays. The
+  worker would replace the seeded arrays. The
   `select_horizon` / `sector_surprise` / `path_metrics` contract is unchanged.
 
 ## What Nazar does not do

@@ -12,6 +12,7 @@ export type Signal = {
 };
 
 export type StockRecord = {
+  itemId?: string;
   symbol: string;
   company: string;
   sector: string;

@@ -66,11 +66,14 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
 import { addableStocks, demoStocks } from "@/lib/nazar/demo-data";
 import { formatChange, formatPrice, projectStock } from "@/lib/nazar/signal-engine";
+import { mapCatchupResponseToStockRecords, nazarApi, useCatchup } from "@/lib/nazar/use-catchup";
 import type { DisplayStock, Signal, StockRecord } from "@/lib/nazar/types";
 
 const MAX_REPLAY_INDEX = demoStocks[0].series.length - 1;
 
 export default function NazarDashboard() {
+  const [watchlistId, setWatchlistId] = useState<string | null>(null);
+  const { data: catchup, error: catchupError } = useCatchup(watchlistId ?? "primary");
   const [stocks, setStocks] = useState<StockRecord[]>(demoStocks);
   const [replayIndex, setReplayIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -83,6 +86,13 @@ export default function NazarDashboard() {
   const [ruleValue, setRuleValue] = useState("");
   const [reviewed, setReviewed] = useState(false);
   const [noiseOpen, setNoiseOpen] = useState(false);
+
+  useEffect(() => {
+    if (catchup) {
+      setWatchlistId(catchup.watchlist_id);
+      setStocks(mapCatchupResponseToStockRecords(catchup));
+    }
+  }, [catchup]);
 
   useEffect(() => {
     if (!playing) return;
@@ -133,35 +143,68 @@ export default function NazarDashboard() {
     toast("Replay reset to your last review");
   }
 
-  function markReviewed() {
-    setReviewed(true);
-    toast.success("Watchlist reviewed through 14:00 IST", {
-      description: "The watermark only moved after your acknowledgement.",
-    });
+  async function markReviewed() {
+    try {
+      await nazarApi("/api/watchlists/me/acknowledge", {
+        method: "POST",
+        body: JSON.stringify({
+          watchlist_id: watchlistId ?? catchup?.watchlist_id ?? "primary",
+          evaluated_through: catchup?.evaluated_through ?? new Date().toISOString(),
+        }),
+      });
+      setReviewed(true);
+      toast.success("Watchlist reviewed", {
+        description: "The backend watermark moved after your acknowledgement.",
+      });
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not save review");
+    }
   }
 
-  function addStock(symbol: string) {
+  async function addStock(symbol: string) {
     const candidate = addableStocks.find((item) => item.symbol === symbol);
     if (!candidate || stocks.some((stock) => stock.symbol === symbol)) return;
-    const next: StockRecord = {
-      symbol: candidate.symbol,
-      company: candidate.company,
-      sector: candidate.sector,
-      sectorIndex: candidate.sector.includes("Technology") ? "NIFTY IT" : "NIFTY 50",
-      baseline: candidate.price,
-      series: Array.from({ length: 12 }, (_, index) => candidate.price * (1 + index * 0.00015)),
-      times: demoStocks[0].times,
-      dataState: "fresh",
-      lastUpdated: "Now",
-      signals: [],
-      narrative: "Tracking starts now. Nazar needs a completed interval before it can assess surprise.",
-    };
-    setStocks((current) => [...current, next]);
-    setAddOpen(false);
-    toast.success(`${symbol} added`, { description: "Tracking starts from the current review watermark." });
+    try {
+      let activeWatchlistId = watchlistId;
+      if (!activeWatchlistId) {
+        const created = await nazarApi("/api/watchlists", {
+          method: "POST",
+          body: JSON.stringify({ name: "My watchlist" }),
+        });
+        activeWatchlistId = created.watchlist_id;
+        setWatchlistId(activeWatchlistId);
+      }
+      const added = await nazarApi(`/api/watchlists/${activeWatchlistId}/items`, {
+        method: "POST",
+        body: JSON.stringify({
+          symbol: candidate.symbol,
+          company_name: candidate.company,
+          sector_index: candidate.sector.includes("Technology") ? "NIFTY IT" : "NIFTY 50",
+        }),
+      });
+      const next: StockRecord = {
+        itemId: added.item_id,
+        symbol: candidate.symbol,
+        company: candidate.company,
+        sector: candidate.sector,
+        sectorIndex: candidate.sector.includes("Technology") ? "NIFTY IT" : "NIFTY 50",
+        baseline: candidate.price,
+        series: Array.from({ length: 12 }, (_, index) => candidate.price * (1 + index * 0.00015)),
+        times: demoStocks[0].times,
+        dataState: "fresh",
+        lastUpdated: "Now",
+        signals: [],
+        narrative: "Tracking starts now. Nazar needs a completed interval before it can assess surprise.",
+      };
+      setStocks((current) => [...current, next]);
+      setAddOpen(false);
+      toast.success(`${symbol} added`, { description: "Saved to your watchlist." });
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not add stock");
+    }
   }
 
-  function saveRule() {
+  async function saveRule() {
     if (!ruleStock || !ruleValue || Number.isNaN(Number(ruleValue))) {
       toast.error("Enter a valid threshold");
       return;
@@ -174,8 +217,13 @@ export default function NazarDashboard() {
         ? ruleStock.currentPrice >= value
         : ruleStock.currentPrice <= value;
 
-    if (crossed) {
-      const signal: Signal = {
+    try {
+      await nazarApi(`/api/watchlists/items/${ruleStock.itemId ?? ruleStock.symbol}/rules`, {
+        method: "POST",
+        body: JSON.stringify({ rule_type: ruleType, threshold: value }),
+      });
+      if (crossed) {
+        const signal: Signal = {
         id: `${ruleStock.symbol}-${Date.now()}`,
         kind: "personal_rule",
         label: isVolume ? `Volume pace crossed ${value.toFixed(1)}×` : `Crossed your ${formatPrice(value)} level`,
@@ -183,13 +231,16 @@ export default function NazarDashboard() {
         tone: "violet",
         triggerIndex: replayIndex,
       };
-      setStocks((current) => current.map((stock) => stock.symbol === ruleStock.symbol ? { ...stock, signals: [...stock.signals, signal] } : stock));
-      toast.success("Rule saved and already crossed");
-    } else {
-      toast.success("Rule saved", { description: "It has not been crossed in this interval." });
+        setStocks((current) => current.map((stock) => stock.symbol === ruleStock.symbol ? { ...stock, signals: [...stock.signals, signal] } : stock));
+        toast.success("Rule saved and already crossed");
+      } else {
+        toast.success("Rule saved", { description: "It has not been crossed in this interval." });
+      }
+      setRuleStock(null);
+      setRuleValue("");
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not save rule");
     }
-    setRuleStock(null);
-    setRuleValue("");
   }
 
   const detailSeries = selected?.series.slice(0, replayIndex + 1).map((value, index) => ({
@@ -236,7 +287,7 @@ export default function NazarDashboard() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Badge variant="outline" className="hidden border-amber-200 bg-amber-50 text-amber-800 sm:inline-flex">Replay · {replayTime} IST</Badge>
+              <Badge variant="outline" className="hidden border-amber-200 bg-amber-50 text-amber-800 sm:inline-flex">{catchupError ? "Demo fallback" : "Backend connected"} · {replayTime} IST</Badge>
               <Button variant="outline" className="rounded-xl bg-white" onClick={() => setAddOpen(true)}><Plus /> Add stock</Button>
               <Button className="rounded-xl bg-[#0b1020] text-white hover:bg-[#1b2440]" onClick={markReviewed} disabled={reviewed}><ShieldCheck /> {reviewed ? "Reviewed" : "Mark reviewed"}</Button>
             </div>
