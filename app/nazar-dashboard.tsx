@@ -219,21 +219,33 @@ export default function NazarDashboard() {
       });
       return;
     }
-    if (!ruleValue || Number.isNaN(Number(ruleValue))) {
-      toast.error("Enter a valid threshold");
+    const value = Number(ruleValue);
+    if (!ruleValue || Number.isNaN(value) || value <= 0) {
+      toast.error("Enter a threshold greater than zero");
       return;
     }
-    const value = Number(ruleValue);
 
     try {
       await nazarApi(`/api/watchlists/items/${encodeURIComponent(ruleStock.itemId)}/rules`, {
         method: "POST",
         body: JSON.stringify({ rule_type: ruleType, threshold: value }),
       });
+      const impossible =
+        ruleType === "price_above"
+          ? value <= ruleStock.baseline
+          : ruleType === "price_below"
+            ? value >= ruleStock.baseline
+            : false;
       setRuleStock(null);
       setRuleValue("");
       refresh();
-      toast.success("Rule saved", { description: "The backend recalculated this review interval." });
+      if (impossible) {
+        toast.warning("Rule saved, but it can never trigger", {
+          description: `The price was already ${ruleType === "price_above" ? "at or above" : "at or below"} ${formatPrice(value)} at your last review (${formatPrice(ruleStock.baseline)}).`,
+        });
+      } else {
+        toast.success("Rule saved", { description: "The backend recalculated this review interval." });
+      }
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Could not save rule");
     }
@@ -259,7 +271,7 @@ export default function NazarDashboard() {
   })) ?? [];
 
   return (
-    <div className="min-h-screen bg-[#f4f6f8] text-slate-950">
+    <div className="min-h-screen overflow-x-clip bg-[#f4f6f8] text-slate-950">
       <Toaster position="top-right" richColors />
 
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[248px] flex-col border-r border-slate-200 bg-[#0b1020] text-white lg:flex">
@@ -272,7 +284,7 @@ export default function NazarDashboard() {
         </nav>
         <div className="mt-7 px-6"><p className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Your watchlist</p></div>
         <div className="mt-3 flex-1 overflow-y-auto px-3 pb-4">
-          {projected.slice(0, 8).map((stock) => (
+          {projected.map((stock) => (
             <button key={stock.symbol} onClick={() => setSelectedSymbol(stock.symbol)} className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-slate-300 hover:bg-white/5">
               <span>{stock.symbol}</span>
               <span className={`size-1.5 rounded-full ${stock.group === "attention" ? "bg-[#b8ff65]" : stock.group === "unavailable" ? "bg-rose-400" : "bg-slate-600"}`} />
@@ -291,13 +303,13 @@ export default function NazarDashboard() {
               <div className="grid size-9 place-items-center rounded-xl bg-[#0b1020] text-[#b8ff65] lg:hidden"><Eye className="size-5" /></div>
               <div>
                 <h1 className="text-xl font-black tracking-[-0.03em]">Your market catch-up</h1>
-                <p className="text-sm text-slate-500">Since your last review · {replayIndex * 15} trading minutes shown</p>
+                <p className="text-sm text-slate-500">Since your last review · {catchup?.trading_minutes ?? 0} trading minutes of market activity</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
               <Badge variant="outline" className="hidden border-amber-200 bg-amber-50 text-amber-800 sm:inline-flex">{loading ? "Connecting" : catchupError ? "Backend unavailable" : catchup?.source === "replay" ? "Replay connected" : "Live connected"} · {replayTime} IST</Badge>
               <Button variant="outline" className="rounded-xl bg-white" onClick={() => setAddOpen(true)}><Plus /> Add stock</Button>
-              <Button className="rounded-xl bg-[#0b1020] text-white hover:bg-[#1b2440]" onClick={markReviewed} disabled={reviewed || !catchup || loading}><ShieldCheck /> {reviewed ? "Reviewed" : "Mark reviewed"}</Button>
+              <Button className="rounded-xl bg-[#0b1020] text-white hover:bg-[#1b2440]" onClick={markReviewed} disabled={reviewed || !catchup || loading || catchup.trading_minutes === 0}><ShieldCheck /> {reviewed || catchup?.trading_minutes === 0 ? "Reviewed" : "Mark reviewed"}</Button>
             </div>
           </div>
         </header>
@@ -334,14 +346,16 @@ export default function NazarDashboard() {
           </section>
 
           <section className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <Tabs value={tab} onValueChange={setTab}>
-              <TabsList className="h-11 rounded-xl bg-white p-1 shadow-sm" variant="default">
-                <TabsTrigger value="all" className="rounded-lg px-4">All</TabsTrigger>
-                <TabsTrigger value="attention" className="rounded-lg px-4">Attention</TabsTrigger>
-                <TabsTrigger value="normal" className="rounded-lg px-4">Normal</TabsTrigger>
-                <TabsTrigger value="unavailable" className="rounded-lg px-4">Unavailable</TabsTrigger>
-              </TabsList>
-            </Tabs>
+            <div className="max-w-full overflow-x-auto">
+              <Tabs value={tab} onValueChange={setTab}>
+                <TabsList className="h-11 rounded-xl bg-white p-1 shadow-sm" variant="default">
+                  <TabsTrigger value="all" className="rounded-lg px-4">All</TabsTrigger>
+                  <TabsTrigger value="attention" className="rounded-lg px-4">Attention</TabsTrigger>
+                  <TabsTrigger value="normal" className="rounded-lg px-4">Normal</TabsTrigger>
+                  <TabsTrigger value="unavailable" className="rounded-lg px-4">Unavailable</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
             <div className="relative w-full sm:w-72">
               <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
               <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search this watchlist" className="h-11 rounded-xl border-slate-200 bg-white pl-9" />
@@ -421,6 +435,9 @@ export default function NazarDashboard() {
           <div className="grid gap-4 py-2">
             <div className="grid gap-2"><Label>Rule type</Label><Select value={ruleType} onValueChange={setRuleType}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="price_above">Price crosses above</SelectItem><SelectItem value="price_below">Price crosses below</SelectItem><SelectItem value="volume_pace">Volume pace exceeds</SelectItem></SelectContent></Select></div>
             <div className="grid gap-2"><Label htmlFor="rule-value">{ruleType === "volume_pace" ? "Multiple" : "Price threshold"}</Label><Input id="rule-value" inputMode="decimal" value={ruleValue} onChange={(event) => setRuleValue(event.target.value)} placeholder={ruleType === "volume_pace" ? "1.8" : "2800"} /></div>
+            {ruleType === "volume_pace" && catchup?.source === "replay" && ruleStock?.symbol !== "HDFCBANK" && (
+              <p className="text-sm text-amber-700">The recorded replay demo only includes volume history for HDFCBANK, so this rule will not be evaluated until live data is connected.</p>
+            )}
           </div>
           <DialogFooter><Button variant="outline" onClick={() => setRuleStock(null)}>Cancel</Button><Button className="bg-[#0b1020]" onClick={saveRule}>Save rule</Button></DialogFooter>
         </DialogContent>

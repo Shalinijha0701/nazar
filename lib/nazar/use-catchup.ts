@@ -9,6 +9,21 @@ const apiBase = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/$/, "");
 const demoToken = process.env.NEXT_PUBLIC_DEMO_TOKEN ?? "demo-token";
 
 
+export function apiErrorMessage(payload: unknown, fallback: string): string {
+  const detail = (payload as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((entry) => (entry && typeof entry === "object" && typeof (entry as { msg?: unknown }).msg === "string"
+        ? (entry as { msg: string }).msg
+        : null))
+      .filter((msg): msg is string => msg !== null);
+    if (messages.length > 0) return messages.join("; ");
+  }
+  return fallback;
+}
+
+
 export function useCatchup(watchlistId?: string | null) {
   const [data, setData] = useState<CatchupResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +46,7 @@ export function useCatchup(watchlistId?: string | null) {
       .then(async (response) => {
         if (!response.ok) {
           const payload = await response.json().catch(() => null);
-          throw new Error(payload?.detail ?? "Backend unavailable");
+          throw new Error(apiErrorMessage(payload, "Backend unavailable"));
         }
         return response.json() as Promise<CatchupResponse>;
       })
@@ -61,7 +76,7 @@ export async function nazarApi<T = unknown>(path: string, init?: RequestInit): P
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail ?? "Nazar API request failed");
+    throw new Error(apiErrorMessage(payload, "Nazar API request failed"));
   }
   return response.json() as Promise<T>;
 }

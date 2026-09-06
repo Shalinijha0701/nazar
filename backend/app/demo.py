@@ -346,6 +346,15 @@ async def recorded_demo_catchup(
         candles = candles_by_symbol.get(item.symbol, [])
         state = instrument.data_state if instrument else DataState.LIMITED_HISTORY
         narrative = instrument.narrative if instrument else "Tracking has started; more data is required."
+        has_unevaluated_volume_rule = item.symbol != "HDFCBANK" and any(
+            rule.armed and rule.rule_type == "volume_pace" and rule.watchlist_item_id == item.id
+            for rule in rules
+        )
+        if has_unevaluated_volume_rule:
+            narrative += (
+                " Your volume-pace rule was not evaluated: the recorded replay demo"
+                " only includes volume history for HDFCBANK."
+            )
         if candles:
             baseline, _ = _interval(candles, reviewed, evaluated)
             current = candles[-1].close

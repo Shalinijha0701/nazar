@@ -17,15 +17,15 @@ Phased overhaul of the application: fix all reported bugs, improve the workflow,
 
 ## Phase 1 — Fix all bugs (from docs/bugs.md)
 
-- [ ] **1.1** BUG-1 (High): human-readable API errors — shared `apiErrorMessage()` handles string *and* array `detail` in `nazarApi`/`useCatchup`; rule dialog validates `value > 0` client-side — `e2e/10-bugs.spec.ts` › "invalid threshold shows a readable error"
-- [ ] **1.2** BUG-3 (Medium): header shows the API's `trading_minutes`, replay position labeled separately — `e2e/10-bugs.spec.ts` › "header reports the API review interval" (+ re-checked after acknowledge in `40-regression`)
-- [ ] **1.3** BUG-4 (Medium): replay mode names unevaluated volume-pace rules in the card narrative (mirror of live-mode honesty) + note in the rule dialog — `e2e/10-bugs.spec.ts` › "volume rule reports it was not evaluated"
-- [ ] **1.4** BUG-5 (Low): warning when a price rule can never trigger (threshold on the wrong side of the current price) — `e2e/10-bugs.spec.ts` › "never-triggerable rule warns"
-- [ ] **1.5** BUG-6 (Low): "Mark reviewed" disabled when `trading_minutes === 0` — asserted in `e2e/40-regression.spec.ts` acknowledge flow
-- [ ] **1.6** BUG-7 (Low): sidebar lists **all** tracked stocks (remove the 8-item cap) — `e2e/10-bugs.spec.ts` › "sidebar lists every tracked stock"
-- [ ] **1.7** BUG-2 (Low): zero horizontal overflow at 375 px — `e2e/10-bugs.spec.ts` › "no horizontal scroll on mobile"
+- [x] **1.1** BUG-1 (High): human-readable API errors — shared `apiErrorMessage()` handles string *and* array `detail` in `nazarApi`/`useCatchup`; rule dialog validates `value > 0` client-side — `e2e/10-bugs.spec.ts` › "invalid threshold shows a readable error" ✅
+- [x] **1.2** BUG-3 (Medium): header shows the API's `trading_minutes`, replay position labeled separately — `e2e/10-bugs.spec.ts` › "header reports the API review interval" ✅ (re-checked after acknowledge in `40-regression`)
+- [x] **1.3** BUG-4 (Medium): replay mode names unevaluated volume-pace rules in the card narrative (mirror of live-mode honesty) + note in the rule dialog — `e2e/10-bugs.spec.ts` › "volume rule reports it was not evaluated" ✅
+- [x] **1.4** BUG-5 (Low): warning when a price rule can never trigger (threshold on the wrong side of the last-review price) — `e2e/10-bugs.spec.ts` › "never-triggerable rule warns" ✅
+- [x] **1.5** BUG-6 (Low): "Mark reviewed" disabled when `trading_minutes === 0` — implemented; asserted again in `e2e/40-regression.spec.ts` acknowledge flow ✅
+- [x] **1.6** BUG-7 (Low): sidebar lists **all** tracked stocks (removed the 8-item cap) — `e2e/10-bugs.spec.ts` › "sidebar lists every tracked stock" ✅
+- [x] **1.7** BUG-2 (Low): zero horizontal overflow at 375 px (tabs row scrolls in its own container; page root `overflow-x-clip`) — `e2e/10-bugs.spec.ts` › "no horizontal scroll on mobile" ✅
 - [ ] **1.8** BUG-8 (Critical, **manual — owner action**): disable Vercel Deployment Protection on the dashboard project so the public demo opens; runbook in `docs/fixes/15-deployment-protection.md` — *cannot be automated or ticked from code*
-- [ ] **1.9** Backend suite still green (`python -m unittest discover -s tests`), Phase 1 boxes ticked, commit + push — "Phase 1: fix all reported bugs"
+- [x] **1.9** Backend suite still green (52/52), lint green, Phase 1 boxes ticked, commit + push — "Phase 1: fix all reported bugs"
 
 ## Phase 2 — Workflow improvements
 
@@ -63,3 +63,4 @@ Phased overhaul of the application: fix all reported bugs, improve the workflow,
 | --- | --- |
 | 2026-09-07 | Plan created; Phase 0 started |
 | 2026-09-07 | Phase 0 complete — harness green (2/2 smoke tests) |
+| 2026-09-07 | Phase 1 complete — 8/8 e2e green, 52/52 backend; 1.8 remains owner action |
