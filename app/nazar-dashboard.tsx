@@ -81,7 +81,7 @@ export default function NazarDashboard() {
   const [ruleStock, setRuleStock] = useState<DisplayStock | null>(null);
   const [ruleType, setRuleType] = useState("price_above");
   const [ruleValue, setRuleValue] = useState("");
-  const [reviewed, setReviewed] = useState(false);
+  const [acknowledgedThrough, setAcknowledgedThrough] = useState<string | null>(null);
   const [noiseOpen, setNoiseOpen] = useState(false);
 
   const stocks = useMemo(
@@ -108,6 +108,8 @@ export default function NazarDashboard() {
     }, 700);
     return () => window.clearInterval(timer);
   }, [maxReplayIndex, playing]);
+
+  const reviewed = !!catchup && acknowledgedThrough === catchup.evaluated_through;
 
   const replayIndex = replayPosition ?? maxReplayIndex;
 
@@ -138,7 +140,14 @@ export default function NazarDashboard() {
     unavailable: projected.filter((stock) => stock.group === "unavailable").length,
   }), [projected]);
 
-  const replayTime = stocks[0]?.times[Math.min(replayIndex, maxReplayIndex)] ?? "11:15";
+  const reviewedLabel = catchup
+    ? new Intl.DateTimeFormat("en-IN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: "Asia/Kolkata",
+      }).format(new Date(catchup.reviewed_through))
+    : "—";
+  const replayTime = stocks[0]?.times[Math.min(replayIndex, maxReplayIndex)] ?? reviewedLabel;
   const surpriseSignal = selected?.visibleSignals.find(
     (signal) => signal.kind === "sector_surprise" && signal.percentile != null,
   );
@@ -146,7 +155,7 @@ export default function NazarDashboard() {
   function resetReplay() {
     setPlaying(false);
     setReplayPosition(0);
-    setReviewed(false);
+    setAcknowledgedThrough(null);
     toast("Replay reset to your last review");
   }
 
@@ -162,7 +171,7 @@ export default function NazarDashboard() {
       });
       setPlaying(false);
       setReplayPosition(0);
-      setReviewed(true);
+      setAcknowledgedThrough(catchup.evaluated_through);
       refresh();
       toast.success("Watchlist reviewed", {
         description: "The backend watermark moved after your acknowledgement.",
@@ -204,14 +213,20 @@ export default function NazarDashboard() {
   }
 
   async function saveRule() {
-    if (!ruleStock || !ruleValue || Number.isNaN(Number(ruleValue))) {
+    if (!ruleStock?.itemId) {
+      toast.error("This stock cannot accept rules yet", {
+        description: "It has no watchlist item id from the backend.",
+      });
+      return;
+    }
+    if (!ruleValue || Number.isNaN(Number(ruleValue))) {
       toast.error("Enter a valid threshold");
       return;
     }
     const value = Number(ruleValue);
 
     try {
-      await nazarApi(`/api/watchlists/items/${ruleStock.itemId ?? ruleStock.symbol}/rules`, {
+      await nazarApi(`/api/watchlists/items/${encodeURIComponent(ruleStock.itemId)}/rules`, {
         method: "POST",
         body: JSON.stringify({ rule_type: ruleType, threshold: value }),
       });
@@ -313,7 +328,7 @@ export default function NazarDashboard() {
                   </div>
                 </div>
                 <Slider className="mt-5" min={0} max={maxReplayIndex} step={1} value={[Math.min(replayIndex, maxReplayIndex)]} onValueChange={(value) => { setPlaying(false); setReplayPosition(value[0] ?? 0); }} />
-                <div className="mt-3 flex items-center justify-between text-xs text-slate-400"><span>Last reviewed · 11:15</span><span className="font-bold text-white">{replayTime} IST</span></div>
+                <div className="mt-3 flex items-center justify-between text-xs text-slate-400"><span>Last reviewed · {reviewedLabel}</span><span className="font-bold text-white">{replayTime} IST</span></div>
               </div>
             </div>
           </section>

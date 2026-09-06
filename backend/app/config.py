@@ -12,10 +12,7 @@ class Settings(BaseSettings):
     groww_access_token: str | None = None
     supabase_url: str | None = None
     supabase_service_role_key: str | None = None
-    allowed_origins: str = (
-        "http://localhost:3000,"
-        "https://nazar-8lczelyeh-shalinijha1008s-projects.vercel.app"
-    )
+    allowed_origins: str = "http://localhost:3000"
 
     model_config = SettingsConfigDict(
         env_file=".env",

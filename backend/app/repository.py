@@ -84,12 +84,19 @@ DEFAULT_ITEMS = (
 )
 
 
+MAX_WATCHLISTS_PER_USER = 20
+
+
 class MemoryWatchlistRepository:
+    """In-memory store. All per-watchlist state is keyed by (user_id, watchlist_id)
+    so identically named watchlists (e.g. the default "primary") never collide
+    across users, and every read of shared dictionaries happens under the lock."""
+
     def __init__(self) -> None:
         self._lock = Lock()
         self._watchlists: dict[tuple[str, str], str] = {}
-        self._items: dict[str, list[WatchlistItemRecord]] = {}
-        self._rules: dict[str, list[RuleRecord]] = {}
+        self._items: dict[tuple[str, str], list[WatchlistItemRecord]] = {}
+        self._rules: dict[tuple[str, str], list[RuleRecord]] = {}
         self._watermarks: dict[tuple[str, str], datetime] = {}
         self._path_events = [
             PathEventRecord(
@@ -108,7 +115,7 @@ class MemoryWatchlistRepository:
         with self._lock:
             if key not in self._watchlists:
                 self._watchlists[key] = "My watchlist"
-                self._items[candidate] = [
+                self._items[key] = [
                     WatchlistItemRecord(
                         id=f"{candidate}:{symbol}",
                         symbol=symbol,
@@ -117,7 +124,7 @@ class MemoryWatchlistRepository:
                     )
                     for symbol, company, sector in DEFAULT_ITEMS
                 ]
-                self._rules[candidate] = [
+                self._rules[key] = [
                     RuleRecord("rule-reliance", f"{candidate}:RELIANCE", "price_above", 2800.0),
                     RuleRecord("rule-hdfc", f"{candidate}:HDFCBANK", "volume_pace", 1.8),
                 ]
@@ -126,14 +133,20 @@ class MemoryWatchlistRepository:
     def create_watchlist(self, user_id: str, name: str) -> str:
         watchlist_id = str(uuid4())
         with self._lock:
-            self._watchlists[(user_id, watchlist_id)] = name
-            self._items[watchlist_id] = []
-            self._rules[watchlist_id] = []
+            owned = sum(1 for owner_id, _ in self._watchlists if owner_id == user_id)
+            if owned >= MAX_WATCHLISTS_PER_USER:
+                raise ValueError("watchlist limit reached")
+            key = (user_id, watchlist_id)
+            self._watchlists[key] = name
+            self._items[key] = []
+            self._rules[key] = []
         return watchlist_id
 
     def list_items(self, user_id: str, watchlist_id: str) -> list[WatchlistItemRecord]:
-        self._owned_watchlist(user_id, watchlist_id)
-        return list(self._items.get(watchlist_id, []))
+        key = (user_id, watchlist_id)
+        with self._lock:
+            self._owned_watchlist_locked(key)
+            return list(self._items.get(key, []))
 
     def add_item(
         self,
@@ -143,17 +156,18 @@ class MemoryWatchlistRepository:
         company_name: str,
         sector_index: str,
     ) -> str:
-        self._owned_watchlist(user_id, watchlist_id)
+        key = (user_id, watchlist_id)
         normalized_symbol = symbol.strip().upper()
         with self._lock:
+            self._owned_watchlist_locked(key)
             existing = next(
-                (item for item in self._items[watchlist_id] if item.symbol == normalized_symbol),
+                (item for item in self._items[key] if item.symbol == normalized_symbol),
                 None,
             )
             if existing:
                 return existing.id
             item_id = f"{watchlist_id}:{normalized_symbol}"
-            self._items[watchlist_id].append(
+            self._items[key].append(
                 WatchlistItemRecord(
                     id=item_id,
                     symbol=normalized_symbol,
@@ -164,16 +178,18 @@ class MemoryWatchlistRepository:
         return item_id
 
     def remove_item(self, user_id: str, item_id: str) -> None:
-        watchlist_id = self._owned_item(user_id, item_id)
         with self._lock:
-            self._items[watchlist_id] = [item for item in self._items[watchlist_id] if item.id != item_id]
-            self._rules[watchlist_id] = [
-                rule for rule in self._rules[watchlist_id] if rule.watchlist_item_id != item_id
+            key = self._owned_item_locked(user_id, item_id)
+            self._items[key] = [item for item in self._items[key] if item.id != item_id]
+            self._rules[key] = [
+                rule for rule in self._rules[key] if rule.watchlist_item_id != item_id
             ]
 
     def list_rules(self, user_id: str, watchlist_id: str) -> list[RuleRecord]:
-        self._owned_watchlist(user_id, watchlist_id)
-        return list(self._rules.get(watchlist_id, []))
+        key = (user_id, watchlist_id)
+        with self._lock:
+            self._owned_watchlist_locked(key)
+            return list(self._rules.get(key, []))
 
     def add_rule(
         self,
@@ -182,17 +198,19 @@ class MemoryWatchlistRepository:
         rule_type: str,
         threshold: float,
     ) -> str:
-        watchlist_id = self._owned_item(user_id, watchlist_item_id)
         rule_id = str(uuid4())
         with self._lock:
-            self._rules[watchlist_id].append(
+            key = self._owned_item_locked(user_id, watchlist_item_id)
+            self._rules[key].append(
                 RuleRecord(rule_id, watchlist_item_id, rule_type, threshold)
             )
         return rule_id
 
     def get_watermark(self, user_id: str, watchlist_id: str, default: datetime) -> datetime:
-        self._owned_watchlist(user_id, watchlist_id)
-        return self._watermarks.get((user_id, watchlist_id), default)
+        key = (user_id, watchlist_id)
+        with self._lock:
+            self._owned_watchlist_locked(key)
+            return self._watermarks.get(key, default)
 
     def list_confirmed_path_events(
         self,
@@ -213,23 +231,22 @@ class MemoryWatchlistRepository:
         watchlist_id: str,
         evaluated_through: datetime,
     ) -> datetime:
-        self._owned_watchlist(user_id, watchlist_id)
         key = (user_id, watchlist_id)
         with self._lock:
+            self._owned_watchlist_locked(key)
             current = self._watermarks.get(key)
             final = max(current, evaluated_through) if current else evaluated_through
             self._watermarks[key] = final
         return final
 
-    def _owned_watchlist(self, user_id: str, watchlist_id: str) -> None:
-        if (user_id, watchlist_id) not in self._watchlists:
+    def _owned_watchlist_locked(self, key: tuple[str, str]) -> None:
+        if key not in self._watchlists:
             raise PermissionError("watchlist not found")
 
-    def _owned_item(self, user_id: str, item_id: str) -> str:
-        for watchlist_id, items in self._items.items():
-            if any(item.id == item_id for item in items):
-                self._owned_watchlist(user_id, watchlist_id)
-                return watchlist_id
+    def _owned_item_locked(self, user_id: str, item_id: str) -> tuple[str, str]:
+        for key, items in self._items.items():
+            if key[0] == user_id and any(item.id == item_id for item in items):
+                return key
         raise PermissionError("watchlist item not found")
 
 

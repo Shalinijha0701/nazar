@@ -1,3 +1,4 @@
+import secrets
 from functools import lru_cache
 
 from fastapi import HTTPException
@@ -20,7 +21,7 @@ def authenticated_user(authorization: str | None, settings: Settings) -> str:
 
     token = authorization.removeprefix("Bearer ").strip()
     if settings.auth_mode == "demo":
-        if token != settings.demo_token:
+        if not secrets.compare_digest(token, settings.demo_token):
             raise HTTPException(status_code=401, detail="Invalid demo token")
         return "demo-user"
 

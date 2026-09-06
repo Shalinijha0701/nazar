@@ -1,8 +1,11 @@
+import logging
+import os
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.auth import authenticated_user
@@ -11,6 +14,15 @@ from app.demo import DEMO_END, DEMO_START, recorded_demo_catchup
 from app.providers.groww import GrowwProvider
 from app.repository import MemoryWatchlistRepository, SupabaseWatchlistRepository, WatchlistStore
 from app.services.live import live_market_catchup
+from app.services.signals import SUPPORTED_HORIZONS
+from app.services.trading_time import trading_minutes_between
+
+
+logger = logging.getLogger("nazar")
+
+
+class ProviderUnavailableError(RuntimeError):
+    """Raised when the upstream market-data provider cannot serve the request."""
 
 
 class WatchlistCreate(BaseModel):
@@ -27,7 +39,7 @@ class WatchlistItemCreate(BaseModel):
 
 class RuleCreate(BaseModel):
     rule_type: str = Field(pattern=r"^(price_above|price_below|volume_pace)$")
-    threshold: float = Field(gt=0)
+    threshold: float = Field(gt=0, le=10_000_000)
 
 
 class AcknowledgeRequest(BaseModel):
@@ -54,9 +66,29 @@ def repository(settings: Settings) -> WatchlistStore:
     return memory_repository()
 
 
+def default_live_watermark(evaluated: datetime) -> datetime:
+    """Walk back until the window covers the largest supported horizon in trading
+    minutes (about five NSE sessions), bounded to 14 calendar days."""
+    candidate = evaluated - timedelta(days=1)
+    earliest = evaluated - timedelta(days=14)
+    while (
+        trading_minutes_between(candidate, evaluated) < SUPPORTED_HORIZONS[-1]
+        and candidate > earliest
+    ):
+        candidate -= timedelta(days=1)
+    return candidate
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     runtime = settings or get_settings()
     runtime.validate_runtime()
+    logging.basicConfig(level=logging.INFO)
+    if runtime.persistence_backend == "memory" and os.environ.get("VERCEL"):
+        logger.warning(
+            "Memory persistence is running on Vercel serverless: state is per-instance "
+            "and will not survive cold starts. Configure NAZAR_PERSISTENCE_BACKEND=supabase "
+            "for the deployed demo."
+        )
     app = FastAPI(
         title="Nazar API",
         version="1.0.0",
@@ -70,14 +102,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
 
+    @app.exception_handler(ProviderUnavailableError)
+    async def provider_unavailable(request: Request, exc: ProviderUnavailableError) -> JSONResponse:
+        logger.warning("Provider unavailable for %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=502,
+            content={"detail": "The market-data provider is unavailable. Try again shortly."},
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled error for %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "An internal error occurred."},
+        )
+
     @app.get("/health")
     async def health() -> dict[str, str]:
-        return {
-            "status": "ok",
-            "market_provider": runtime.market_provider,
-            "persistence": runtime.persistence_backend,
-            "auth": runtime.auth_mode,
-        }
+        return {"status": "ok"}
 
     @app.post("/api/watchlists")
     async def create_watchlist(
@@ -85,7 +128,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, str]:
         user_id = authenticated_user(authorization, runtime)
-        watchlist_id = repository(runtime).create_watchlist(user_id, payload.name.strip())
+        try:
+            watchlist_id = repository(runtime).create_watchlist(user_id, payload.name.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=429, detail="Watchlist limit reached") from exc
         return {"watchlist_id": watchlist_id, "name": payload.name.strip()}
 
     @app.post("/api/watchlists/{watchlist_id}/items")
@@ -164,18 +210,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         evaluated = datetime.now(UTC).replace(second=0, microsecond=0)
-        reviewed = store.get_watermark(user_id, resolved_id, evaluated - timedelta(hours=4))
+        reviewed = store.get_watermark(user_id, resolved_id, default_live_watermark(evaluated))
         confirmed_events = store.list_confirmed_path_events(user_id, resolved_id, reviewed)
-        provider = GrowwProvider(runtime.groww_access_token or "")
-        return await live_market_catchup(
-            resolved_id,
-            items,
-            rules,
-            reviewed,
-            evaluated,
-            provider,
-            confirmed_events,
-        )
+        try:
+            provider = GrowwProvider(runtime.groww_access_token or "")
+            return await live_market_catchup(
+                resolved_id,
+                items,
+                rules,
+                reviewed,
+                evaluated,
+                provider,
+                confirmed_events,
+            )
+        except Exception as exc:
+            raise ProviderUnavailableError(str(exc)) from exc
 
     @app.post("/api/watchlists/me/acknowledge")
     async def acknowledge(

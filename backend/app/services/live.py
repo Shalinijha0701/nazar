@@ -78,7 +78,11 @@ async def live_market_catchup(
         baseline = candles[0].close
         active = [candle for candle in candles if candle.interval_start > reviewed]
         signals: list[Signal] = []
-        for rule in rules_by_item.get(item.id, []):
+        item_rules = rules_by_item.get(item.id, [])
+        has_unevaluated_volume_rule = any(
+            rule.armed and rule.rule_type == "volume_pace" for rule in item_rules
+        )
+        for rule in item_rules:
             if not rule.armed or rule.rule_type == "volume_pace":
                 continue
             crossed_at = (
@@ -98,6 +102,13 @@ async def live_market_catchup(
                     )
                 )
 
+        narrative = "Live price and personal price rules are available; statistical distributions are not loaded."
+        if has_unevaluated_volume_rule:
+            narrative += (
+                " Your volume-pace rule was not evaluated because historical same-minute"
+                " volume data is not available in live mode yet."
+            )
+
         current = candles[-1].close
         card = CatchupCard(
             item_id=item.id,
@@ -109,7 +120,7 @@ async def live_market_catchup(
             change_since_review_percent=round((current - baseline) / baseline * 100, 2),
             data_state=DataState.LIMITED_HISTORY if is_market_open(evaluated) else DataState.MARKET_CLOSED,
             last_updated_at=candles[-1].interval_start,
-            narrative="Live price and personal rules are available; statistical distributions are not loaded.",
+            narrative=narrative,
             chart=[ChartPoint(timestamp=candle.interval_start, price=candle.close) for candle in candles],
             signals=signals,
         )

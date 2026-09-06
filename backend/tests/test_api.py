@@ -1,5 +1,6 @@
 from datetime import timedelta
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -128,6 +129,68 @@ class CatchupApiTests(unittest.TestCase):
             json={"watchlist_id": "primary", "evaluated_through": "2026-09-04T08:30:00"},
         )
         self.assertEqual(response.status_code, 422)
+
+    def test_health_reports_only_status(self) -> None:
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
+    def test_rule_threshold_upper_bound(self) -> None:
+        payload = self.catchup().json()
+        item = next(card for card in payload["normal"] if card["symbol"] == "TCS")
+        response = self.client.post(
+            f"/api/watchlists/items/{item['item_id']}/rules",
+            headers=self.headers,
+            json={"rule_type": "price_above", "threshold": 1e308},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_watchlist_creation_limit_maps_to_429(self) -> None:
+        for index in range(20):
+            created = self.client.post(
+                "/api/watchlists",
+                headers=self.headers,
+                json={"name": f"watchlist {index}"},
+            )
+            self.assertEqual(created.status_code, 200)
+        overflow = self.client.post(
+            "/api/watchlists",
+            headers=self.headers,
+            json={"name": "one too many"},
+        )
+        self.assertEqual(overflow.status_code, 429)
+
+    def test_internal_error_returns_safe_body(self) -> None:
+        client = TestClient(self.client.app, raise_server_exceptions=False)
+        with patch("app.main.repository", side_effect=RuntimeError("boom")):
+            response = client.get("/api/watchlists/me/catchup", headers=self.headers)
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json(), {"detail": "An internal error occurred."})
+
+
+class LiveModeErrorTests(unittest.TestCase):
+    def test_provider_failure_maps_to_502(self) -> None:
+        memory_repository.cache_clear()
+        settings = Settings(
+            market_provider="groww",
+            groww_access_token="test-groww-token",
+            persistence_backend="memory",
+            auth_mode="demo",
+            demo_token="test-token",
+            allowed_origins="http://localhost:3000",
+            _env_file=None,
+        )
+        client = TestClient(create_app(settings), raise_server_exceptions=False)
+        with patch("app.main.GrowwProvider", side_effect=RuntimeError("provider down")):
+            response = client.get(
+                "/api/watchlists/me/catchup",
+                headers={"Authorization": "Bearer test-token"},
+            )
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.json(),
+            {"detail": "The market-data provider is unavailable. Try again shortly."},
+        )
 
 
 class ConfigurationTests(unittest.TestCase):
