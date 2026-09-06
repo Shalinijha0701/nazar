@@ -7,10 +7,13 @@
   },
   "scripts": {
     "dev": "next dev",
+    "dev:api": "cd backend && ..\\.venv\\Scripts\\python.exe -m uvicorn app.main:app --reload --port 8000",
+    "dev:all": "concurrently -n api,web -c blue,green \"npm:dev:api\" \"npm:dev\"",
     "build": "next build",
     "start": "next start",
     "test": "node --import tsx --test tests/*.test.mjs",
-    "lint": "eslint . --ignore-pattern .next"
+    "test:e2e": "playwright test",
+    "lint": "eslint . --ignore-pattern .next --ignore-pattern test-results --ignore-pattern playwright-report"
   },
   "dependencies": {
     "class-variance-authority": "0.7.1",
@@ -26,10 +29,12 @@
     "tailwind-merge": "3.6.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "4.3.3",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "concurrently": "^10.0.5",
     "eslint": "9.39.4",
     "eslint-config-next": "16.3.4",
     "tailwindcss": "4.3.3",
